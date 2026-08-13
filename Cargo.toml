@@ -3,4 +3,21 @@ name = "zero2prod"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+path = "src/lib.rs"
+
+# 一个项目中只能有一个库crate，但是可以有多个二进制crate
+# [bin]表示二进制crate数组
+# 如果要有多个库crate，使用workspace实现
+[[bin]]
+path = "src/main.rs"
+name = "zero2prod"
+
 [dependencies]
+actix-web = "4.0.0"
+tokio = {version = "1", features = ["macros", "rt-multi-thread"]}
+
+# 开发依赖项只在运行测试或者示例时使用
+# 最后的二进制文件没有包括这些依赖项
+[dev-dependencies]
+reqwest = "0.11"

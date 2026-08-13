@@ -1,0 +1,62 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: ~/.cargo
+  CARGO_TARGET_DIR: target
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 原生方式安装Rust，抛弃 actions-rs/toolchain
+      - name: Install Rust toolchain
+        run: |
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 4. fmt 代码格式校验
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # 3. clippy 静态代码检查
+      - name: Clippy static analysis
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # 编译
+      - name: Build
+        run: cargo build --verbose
+
+      # 1. 单元测试
+      - name: Run tests
+        run: cargo test --verbose
+
+      # 2. tarpaulin 覆盖率
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Generate coverage report
+        run: cargo tarpaulin --verbose --out xml --out html
+
+      # 5. cargo-audit 依赖安全审计
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Security audit dependencies
+        run: cargo audit
