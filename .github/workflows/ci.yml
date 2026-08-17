@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,13 +12,30 @@ env:
   CARGO_TARGET_DIR: target
 
 jobs:
-  build:
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    # 全局 DATABASE_URL，所有 step 自动继承
+    env:
+      DATABASE_URL: postgres://postgres:password@localhost:5432/newsletter
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: newsletter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
 
-      # 原生方式安装Rust，抛弃 actions-rs/toolchain
       - name: Install Rust toolchain
         run: |
           rustup default stable
@@ -33,29 +50,29 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # 4. fmt 代码格式校验
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres,native-tls
+
+      - name: Migrate database
+        run: sqlx migrate run
+
       - name: Check formatting
         run: cargo fmt --check
 
-      # 3. clippy 静态代码检查
       - name: Clippy static analysis
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # 编译
       - name: Build
         run: cargo build --verbose
 
-      # 1. 单元测试
       - name: Run tests
         run: cargo test --verbose
 
-      # 2. tarpaulin 覆盖率
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Generate coverage report
         run: cargo tarpaulin --verbose --out xml --out html
 
-      # 5. cargo-audit 依赖安全审计
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Security audit dependencies

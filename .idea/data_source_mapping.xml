@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourcePerFileMappings">
+    <file url="file://$PROJECT_DIR$/migrations/20260816155948_create_subscriptions_table.sql" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
+    <file url="file://$PROJECT_DIR$/tests/health_check.rs" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
+  </component>
+</project>
