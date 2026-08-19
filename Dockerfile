@@ -23,11 +23,11 @@ COPY . .
 ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
-# 运行时阶段 —— 改成 bookworm-slim
+# 运行时阶段 —— 改成 bookworm-slim，换源也要兼容 Debian 12
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
-RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g; s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true && \
+    find /etc/apt/sources.list.d -type f \( -name "*.list" -o -name "*.sources" \) -exec sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g; s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' {} + 2>/dev/null || true && \
     apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
