@@ -1,7 +1,6 @@
 # 获取 cargo chef
 FROM lukemathwalker/cargo-chef:latest-rust-1.97.1 AS chef
 WORKDIR /app
-# 兼容 Debian 11/12：替换所有 apt 源文件中的域名
 RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g; s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true && \
     find /etc/apt/sources.list.d -type f \( -name "*.list" -o -name "*.sources" \) -exec sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g; s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' {} + 2>/dev/null || true && \
     apt-get update && apt-get install -y --no-install-recommends lld clang && \
@@ -24,8 +23,8 @@ COPY . .
 ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
-# 运行时阶段
-FROM debian:bullseye-slim AS runtime
+# 运行时阶段 —— 改成 bookworm-slim
+FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
     sed -i 's/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
