@@ -3,6 +3,24 @@ use sqlx::{Executor, PgConnection, PgPool, Connection};
 use zero2prod::configurations::{get_configurations, DatabaseSettings};
 use std::net::TcpListener;
 use zero2prod::startup::run;
+use zero2prod::telemetry::{get_subscriber, init_subscriber};
+use once_cell::sync::Lazy;
+use secrecy::ExposeSecret;
+// 使用once_cell确保tracing只能被初始化一次
+static TRACING: Lazy<()> = Lazy::new(|| {
+    let default_filter_level = "info".to_string();
+    let subscriber_name ="test".to_string();
+    // 由于'sink'是'get_subscriber'返回类型的一部分
+    // 导致两个条件分支中'subscriber'的返回类型不一样
+    // 因此没办法将其提取出来
+    if std::env::var("TEST_LOG").is_ok() {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level, std::io::stdout);
+        init_subscriber(subscriber);
+    } else {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level, std::io::sink);
+        init_subscriber(subscriber);
+    }
+});
 pub struct TestApp {
     pub address: String,
     pub db_pool: PgPool,
@@ -31,6 +49,8 @@ async fn health_check_works() {
 // 在后台某处启动应用程序
 // spawn_app 是唯一合理依赖应用程序代码的部分。其他的一切测试都与底层实现细节无关。
 async fn spawn_app() -> TestApp {
+    Lazy::force(&TRACING);
+
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port(); // local_addr()获取端口
     let address = format!("http://127.0.0.1:{}", port);
@@ -50,7 +70,7 @@ async fn spawn_app() -> TestApp {
 
 pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
     // 创建数据库
-    let mut connection = PgConnection::connect(&config.connection_string_without_db())
+    let mut connection = PgConnection::connect(&config.connection_string_without_db().expose_secret())
         .await
         .expect("Failed to connect to Postgres");
     connection
@@ -58,7 +78,7 @@ pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
         .await
         .expect("Failed to create database");
     // 迁移数据库
-    let connection_pool = PgPool::connect(&config.connection_string())
+    let connection_pool = PgPool::connect(&config.connection_string().expose_secret())
         .await
         .expect("Failed to connect to Postgres");
     sqlx::migrate!("./migrations")

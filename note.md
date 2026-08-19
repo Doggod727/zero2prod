@@ -202,3 +202,116 @@ PgPool是一个Postgres数据库连接池。当对&PgPool进行查询时，sqlx�
 2. 每一个集成测试都有一个单独的逻辑数据库
 第一种方法适合于单元测试，因为回滚一个事务快于启动一个新的数据库。但是在集成测试中很麻烦？
 第二种方法虽然慢，但是实现简单。
+
+# ch4 遥测
+## ch4.1 未知的未知
+测试套件不能证明代码完全正确。我们还需要探索其他验证正确性的途径。
+运行时环境是极为复杂的，我们可能没有考虑到。
+1. 如果应用程序与数据库断开链接时会发生什么？
+2. 如果有攻击者尝试构造POST /subscriptions 请求，并发送恶意数据，能够合理处理吗？
+未知的未知问题：从未处理过从未预见过的问题。
+## ch4.2 可观测性
+遥测数据：由应用程序自动收集的运行时的信息。
+面对“未知的未知”问题，我们不知道何时发生，需要哪些信息才能发现问题。
+所以我们需要构建一个可观测的应用程序。
+可观测性的目标是可以回答对环境提出的任何问题，无需提前知道问题是什么。
+构建可观测的应用程序：
+1. 利用插桩收集高质量的遥测数据
+2. 利用工具切分和处理所有收集的数据，用来回答需要了解的问题。
+## ch4.3 日志
+日志是最基本的遥测数据。
+### ch4.3.1 log包
+log包用来做日志记录，包含5个宏：trace，debug，info，warn和error。
+提供的功能是用宏的名称所代表的日志级别，记录一条日志。
+trace最低级别，日志比较详细。接下来分别是debug, info, warn, error.
+error是最高级别，用于记录严重到影响到用户体验的错误。
+### ch4.3.2 actix-web的Logger中间件
+中间件指的是HTTP请求到服务器端处理时之间，以及处理完毕之后返回到客户端之间的部分。
+actix-web提供了一个Logger中间件，每一个HTTP请求都会产生一个日志。
+### ch4.3.3 外观模式
+log包通过外观模式处理日志记录的处理.
+它提供记录日志的接口，但是没有限定处理这些日志的方法。
+在main函数的起始位置，调用set_logger函数，传入实现了Log trait的实现：每当一个日志通过Log::log被记录时，都会调用该实现。
+如果没有调用，所有日志都会被丢弃。
+现在初始化记录器。
+env_logger::Logger将日志输出到控制台，输出格式 
+ \[<时间戳> <日志级别> <模块路径>] <日志消息>
+RUST_LOG环境变量来决定输出和过滤哪些日志。
+RUST_LOG = debug cargo run将所有debug以上级别的日志记录，包括应用程序本身的日志，使用的包中的日志。
+如果设置为RUST_LOG=zero2prod 则会过滤所有的使用的包的日志。
+
+## ch4.4 插桩POST /subscriptions
+使用log包来插桩POST /subscriptions 插桩也就是收集遥测数据。
+### ch4.4.1 与外部系统的交互
+经验法则：在所有通过网络和外部系统交互的过程中，都要反复不断地记录当前状态。
+### ch4.4.2 像用户一样思考
+为了更方便了解决未知的未知，我们需要站方位词的角度提出一个问题，然后尝试丰富日志消息，方便我们找到原因。
+### ch4.4.3 日志应该便于关联
+各个请求对应的日志消息应该存在明确的分离点。这样易于分析。
+我们需要一种方法将日志和请求绑定在一起。
+使用请求id即可：开始处理一个请求时，首先生成一个随机的标识符，用于将日志和请求关联起来。
+由于request-id是在subscribe函数中生成的，所以Logger中间件是知道该id的，所以我们也无法知道该请求对应的返回的状态码是什么。因为所有Logger记录的日志没有request-id。
+## ch4.5 结构化日志
+确保所有的日志记录都有一个请求对应的关联ID。
+### ch4.5.1 tracing包
+tracing允许包和应用程序记录结构化事件，并在其中包含用于说明结构性和因果性的信息，以此开展日志形式的诊断。
+### ch4.5.2 从log迁移到tracing
+直接将log替换为tracing，启用log功能标志，当tracing的宏记录了一个事件或者跨度，都会被log收集起来。
+所以输出日志暂时没有区别。
+### ch4.5.3 tracing中的跨度
+跨度可以根据程序结构更好地捕获信息。我们想要创建一个跨度，其与当前所处理的请求相对应。
+info_span!宏创建一个跨度，我们可以使用结构化信息以键值对的方式存储起来。
+可以显示的给出键名。使用%修饰变量，表示log日志记录时使用其std::fmt::Display来实现。
+我们需要显示的使用enter函数来进入跨度。
+.enter()得到一个Enter类型，这是一个守卫对象。这个变量在析构之前，之后的所有下游跨度都会被注册为子跨度。
+。
+创建跨度时输出传入跨度的第一个形参。
+进入当前跨度 ->
+退出跨度 <- (Enter被析构)
+关闭跨度 -- (跨度本身被析构)
+
+### ch4.5.4 插桩Future
+让跨度模拟一个future的生命周期：当future被轮询时，进入所对应的跨度；当future被挂起时，退出对应的跨度。
+使用Instrument扩展future即可。
+Instrument::instrument ： 以跨度为参数，每当self，也就是future被轮询时，进入该跨度。future被挂起时，退出该跨度。
+### ch4.5.5 tracing的Subscriber
+由于evn_logger无法解析tracing中跨度的结构化数据。
+需要用tracing替换掉env_logger即可。也就是使用Subscriber即可。
+### ch4.5.6 tracing-subscriber
+使用tracing-subscriber，该包实现了trace::Subscriber trait。
+tracing-subscriber提供了一个trait Layer。使得跨度数据能够以流水线的方式处理。
+Registry实现了Subscriber trait，并处理架构中最复杂的内容。
+### ch4.5.7 tracing-bunyan-formatter
+1. tracing_subscriber::filter::EnvFilter 可以根据跨度的级别和来源来筛选跨度
+2. tracing_bunyun_formatter::JsonStorageLayer 可以处理跨度数据，将其转换为易于处理的Json数据。并发给下游的层次，能将上游跨度的上下文传播到下游
+3. tracing_bunyun_formatter::BunyanFormatterLayer: 在JsonStorageLayer的基础之上工作，以兼容bunyan的JSON格数输出
+### ch4.5.8 tracing-log
+actix-web的日志去哪呢？
+tracing的log功能标志确保每当tracing事件发生时都会发出一条日志记录，log的记录器可以将其收集起来。反过来则不成立。log日志自身不会在记录时发送tracing消息。
+我们可以使用tracing-log包中的LogTrace来解决。
+### ch4.5.9 删掉未使用的依赖
+使用cargo-udeps 去除无用的依赖。
+cargo-udeps使用nightly编译，输出的是不需要的依赖的名称
+### ch4.5.10 清理初始化流程
+### ch4.5.11 集成测试中的日志
+在测试套件中使用结构化日志，可以大幅度提高我们调试的效率。
+我们不希望每个测试套件都阅读大量的日志记录，也就是尝试忽略测试。
+对于print/println 可以使用cargo test -- --nocapture实现。
+对于tracing需要在get_subscriber额外加入一个参数。用于控制日志是否应该被输出。
+### ch4.5.12 清理插桩代码
+日志的收集为函数的实现带来了干扰，我们希望将函数的所有步骤都在span的上下文中，也就是将函数包装在span中。
+我们可以通过使用tracing::instrument过程宏实现。
+#[tracing::instrument]在函数声明处创建了一个跨度，并将所有的参数传入到跨度的上下文中。我们可以通过skip指令忽略。
+name用于给出函数跨度自身的日志信息。
+我们也可以使用fields指令添加部分值进入上下文。
+### ch4.5.13 保护隐私 secrecy
+tracing::instrument会默认将传入函数的参数添加到上下文，这会使得我们输出的日志包含参数，即使他不应该被输出。所以我们可以引入secrecy::Secret来避免这个问题。
+他会显式地将某个字段标记为敏感信息。
+Secret是一个包装器，要访问其内部的内容使用Secret提供的expose_secret()方法。
+secret的Debug实现会输出`Secret([REDACTED STRING])`。
+这个类型还可以充当文档的类型，说明哪些类型是隐私的。
+### ch4.5.14 请求ID
+如何确保处理相同请求的过程中收集到的所有日志，包括状态码，都关联了request_id.
+1. 如果不去改动actix-web::Logger中间件，可以尝试去添加另外一个中间件RequestIdMiddleware
+其可以生成唯一的请求Id，创建一个新的跨度，上下文包含了请求ID，将下游的中间件都包装到这个新创建的跨度中。
+2. 使用tracing生态系统中的工具。tracing-actix-web包
