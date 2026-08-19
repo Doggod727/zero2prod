@@ -47,13 +47,9 @@ services:
       scope: RUN_TIME
       value: ${newsletter.DATABASE}
 databases:
-  # PG = Postgres
   - engine: PG
-    # 数据库名称
     name: newsletter
-    # 只部署一个数据库节点，可以省点钱
-    num_nodes: 1
-    size: db-s-dev-database
-    # Postgres 版本
-    version: "16"
-    production: false
+    production: true
+    cluster_name: newsletter-db
+    db_name: newsletter
+    db_user: newsletter
