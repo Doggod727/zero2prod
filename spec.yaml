@@ -1,0 +1,32 @@
+#file: noinspection SpellCheckingInspection
+#! spec.yaml
+name: zero2prod
+# 在官方文档的App platform部分，可以查看所有可用选项的列表。
+region: sgp
+services:
+  - name: zero2prod
+    # 相对于仓库根目录
+    dockerfile_path: Dockerfile
+    source_dir: .
+    github:
+      # 默认分支名称
+      branch: main
+      # 每次像'main'分支提交时都会部署一个新的版本
+      # 持续部署
+      deploy_on_push: true
+      # !!! 填写细节
+      repo: Doggod727/zero2prod
+    # DigitalOcean使用探针去报应用程序健康
+    health_check:
+      # 健康检查端点
+      http_path: /health_check
+    # 应用程序接受请求时将监听的端口
+    # 应该与我们configuration/production.yaml 文件中一致
+    http_port: 8000
+    # 对于生产环境的复杂
+    # 至少选择两个，但是我们为了省钱
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    # 所有传入的请求都会被转发到应用程序
+    routes:
+      - path: /

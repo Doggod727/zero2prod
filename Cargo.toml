@@ -1,7 +1,7 @@
 [package]
 name = "zero2prod"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [lib]
 path = "src/lib.rs"
@@ -37,6 +37,7 @@ features = [
     "uuid",
     "chrono",
     "migrate",
+    "offline",
 ]
 # 开发依赖项只在运行测试或者示例时使用
 # 最后的二进制文件没有包括这些依赖项
