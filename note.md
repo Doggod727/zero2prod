@@ -399,7 +399,130 @@ DigitalOcean通过提供一个证书，设置了HTTPS，并将HTTPS流量重定�
 POST /subscriptions端点失败，在生产环境中没有提供数据库。
 ### ch5.4.3 如何使用环境变量注入加密信息
 我们使用环境变量来定制Settings结构体中的任何值，从而取代配置文件中指定的内容。
-环境变量对于config包视为字符串，如果使用serde的反序列化，无法提取整数。
+环境变量对config包视为字符串，如果使用serde的反序列化，无法提取整数。
 我们可以指定一个自定义的反序列化函数。
 ### ch5.4.5 连接到DigitalOcean的Postgres实例
 在生产环境中为客户端/数据库提供传输层加密是有必要的，就是去支持SSL模式。
+# ch6 拒绝无效的订阅者（第一部分）
+POST /subscriptions端点只实现了一个最基本的通过Form提取器反序列化出FormData，但是没有验证提取出来的数据的正确性。
+## ch6.1 需求
+### ch6.1.1 姓名约束
+可以简单的要求姓名字段非空。
+### ch6.1.2 安全约束
+表单和用户输入作为主要攻击目标(SQL注入，服务器上运行恶意代码，搞崩服务等)
+可能遇到的问题：
+1. 拒绝服务
+2. 窃取数据
+3. 网络钓鱼
+
+采用分层安全方法来解决这些威胁：通过在技术栈的多个层面上采取应对策略来降低这些威胁的风险。
+1. 限制最大长度
+2. 拒绝包含问题字符的名字。/()"<>\{}
+## ch6.2 第一次实现
+一个扩展trait，为'String'和'&str'提供‘graphemes'方法
+unicode_segmentation::UnicodeSegmentation
+## ch6.3 漏洞百出的验证
+insert_subscriber方法要保证form.name不为空。
+虽然我们使用了is_valid_name进行验证，但是是在当前函数外部进行的。
+在大型项目中，检查函数的所有调用点以确保事先执行了某一个验证步骤是不切实际的。
+如果一定要用is_valid_name, 我们唯一可行的方案是在所有要求form.name非空的函数内部调用。
+但是如果insert_subscriber会被拆分若干个子函数，每一个函数又要调用is_valid_name.
+扩展性极差。
+由于is_valid_name是一个验证函数：在程序执行流程的某一个特定点，一组条件得到了验证，但是关于输入数据中附加结构的信息没有被存储在任何地方。会立即消失，导致无法重用。
+我们需要添加一个解析函数--接受非结构化输入的程序。如果一组条件成立，返回更加结构化的输出。
+## ch6.4 类型驱动开发
+我们创建了一个元组结构体SubscriberName。
+注意，其字段是私有的，所以其元组结构体构造器也是私有的。无法直接访问。
+parse方法是构建SubscriberName的唯一方法，任何SubscriberName实例都能满足约束。
+我们从所有的订阅者的姓名必须符合一些约束条件开始，确定了一个潜在的问题（在调用insert_subscriber之前可能忘记了验证输入），并利用Rust的类型系统完成该功能。
+我们通过构造类型使得错误的使用方式无法被编译出来。
+这种技术叫做”类型驱动开发“。
+类型驱动开发：将我们试图建模的domain约束条件编码到类型系统中，并依靠编译器来确保这些约束得到执行。
+（我们的例子：String不为空的约束 -> SubscriberName）
+
+## ch6.5 所有权遇到不变量
+为什么不能将SubscriberName(String) -> SubscriberName(pub String)呢？
+1. 其他开发人员可以直接访问字段，构造一个不满足SubscriberName的约束条件的值
+2. 即使使用了，也可以通过修改导致其不在满足约束条件。
+
+可以利用Rust所有权机制解决。（如何访问私有字段的值）
+我们可以通过公有方法访问，可以获取值所有权，原来的SubscriberName失效，成员被移动了。可以获取值的共享引用，也就是不可变引用。
+### ch6.5.1 AsRef
+AsRef可以用来获得一个结构体或者元组的私有字段的不可变引用。
+````
+pub trait AsRef<T: ?Sized> {
+ /// 执行转换
+ fn as_ref(&self) -> &T;
+}
+````
+AsRef是一个引用转换trait。
+如果类型Self与T足够相似，就可以实现该trait，通过&self,得到&T.
+## ch6.6 panic
+更优雅地处理错误。
+panic被用来处理不可恢复的错误！显然这里不适合。
+## ch6.7 Result --将错误作为值
+### ch6.7.1 使用解析函数返回Result类型
+重构SubscriberName::parse方法，输入无效返回Result<SubscriberName, Box<dyn Error>>
+## ch6.8 精确的断言错误：claim
+Rust提供的assert!宏进行断言时，产生的错误很难糟糕。
+没有错误的详细消息。我们可以使用claim crate获取更多消息。
+## ch6.9 单元测试
+test模块
+## ch6.10 处理Result
+使得验证错误时返回400 Bad Request
+### ch6.10.1 match
+REST API是一种设计风格 URL定位资源，POST是HTTP请求方法，输入是表单数据，输出是HTTP状态码。
+### ch6.10.2 ?操作符
+是抛出错误的语法糖，只能用于Result枚举和Option
+### ch6.10.3 400的请求错误
+## ch6.11 电子邮件地址格式
+如何确定有效的电子邮件地址。
+Rust生态中有一个 validator包用来验证邮箱的有效性。
+## ch6.12 SubscriberEmail类型
+### ch6.12.1 拆分domain子模块
+### ch6.12.2 新类型的框架
+## ch6.13 属性测试
+不是验证一组特定的输入是否被正确解析，而是构建一个随机生成器来产生有效的值。并检查解析器是否会拒绝它们。
+也就是验证实现是否显示了一个特定的属性。不会拒绝任何有效的电子邮件地址。
+### ch6.13.1 使用fake生成随机测试数据
+fake提供了基本数据类型和高级对象的生成逻辑。
+生成一个随机数据进行测试可能需要手动运行多次测试进行调整验证才能触碰到边界。
+一个简单高效的方法是添加for循环。
+### ch6.13.2 quickcheck和proptest
+这是两个主流的属性测试选项
+### ch6.13.3 quickcheck入门
+quickcheck会以配置好的迭代次数，默认是100循环调用函数，每次迭代中都会随机生成满足参数列表条件的参数，传入，进行验证，判断函数是否返回true
+如果是false，quickcheck会不断缩小迭代次数获得失败用例。
+### ch6.13.4 Arbitrary trait
+quickcheck通过Arbitrary trait生成随机输入数据。
+````
+pub trait Arbitrary: Clone + Send + 'static {
+   fn arbitrary<G: Gen>(g: &mut G) -> Self;
+   
+   fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+       empty_shrinker()
+   }
+}
+````
+arbitrary 给定一个随机源，返回一个该实例的类型。
+shrink 返回该类型的一个逐渐变小的实例序列。
+## ch6.14 请求体验证
+### ch6.14.1 使用TryFrom重构
+TryFrom： 两种类型之间可能失败的转换，同时会获取输入值的所有权
+````
+pub trait TryFrom<T>: Sized {
+ /// 在转换错误的情况返回错误类型
+ type Error;
+ 
+ /// 执行转换
+ fn try_from(value: T) -> Result<Self, Self::Error>;
+}
+````
+我们实现了TryFrom调用的是try_into()
+````
+pub trait TryInto<T> {
+ type Error;
+ fn try_into(self) -> Result<T, Self::Error>;
+}
+````
+
