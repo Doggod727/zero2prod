@@ -1,13 +1,17 @@
 //! src/configurations.rs
 use secrecy::{ExposeSecret, Secret};
+use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_number_from_string;
 use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgSslMode;
+use crate::domain::SubscriberEmail;
+
 #[derive(serde::Deserialize)]
 pub struct Settings {
     pub database: DatabaseSettings, // 数据库链接配置
     pub application: ApplicationSettings, // 应用端口
+    pub email_client: EmailClientSettings,
 }
 
 #[derive(serde::Deserialize)]
@@ -102,5 +106,23 @@ impl TryFrom<String> for Environment {
                 format!("{} is not a supported environment. Use either 'local' or 'production'.", other)
             ),
         }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EmailClientSettings {
+    pub base_url: String,
+    pub sender: String,
+    pub authorization_token: Secret<String>,
+    pub timeout_milliseconds: u64,
+}
+
+impl EmailClientSettings {
+    pub fn sender(&self) -> Result<SubscriberEmail, String> {
+        Ok(SubscriberEmail::parse(self.sender.clone())?)
+    }
+    
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_milliseconds)
     }
 }

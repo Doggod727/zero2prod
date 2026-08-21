@@ -3,3 +3,7 @@ application:
   host: 0.0.0.0
 database:
   require_ssl: true
+email_client:
+  # 从Postmark的API文档中获取的值
+  base_url: "https://api.postmarkapp.com"
+  sender_email: "lihuan2@stu.scu.edu.cn"

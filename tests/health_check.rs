@@ -5,6 +5,8 @@ use std::net::TcpListener;
 use zero2prod::startup::run;
 use zero2prod::telemetry::{get_subscriber, init_subscriber};
 use once_cell::sync::Lazy;
+use zero2prod::email_client::EmailClient;
+
 // 使用once_cell确保tracing只能被初始化一次
 static TRACING: Lazy<()> = Lazy::new(|| {
     let default_filter_level = "info".to_string();
@@ -58,9 +60,19 @@ async fn spawn_app() -> TestApp {
     configuration.database.database_name = uuid::Uuid::new_v4().to_string();
     let connection_pool = configure_database(&configuration.database).await;
 
+    // 创建一个新的邮件客户端。
+    let sender_email = configuration.email_client.sender()
+        .expect("Invalid sender email address.");
+    let timeout = configuration.email_client.timeout();
+    let email_client = EmailClient::new(
+        configuration.email_client.base_url,
+        sender_email,
+        configuration.email_client.authorization_token,
+        timeout
+    );
     // 如果直接调用run，由于HttpServer::run()返回一个Server，其不会主动关闭，我们的测试就不会结束
     // tokio::spawn方法就十分方便，其接受一个future，并交给运行时轮询，而无需等待其完成。
-    let server = run(listener, connection_pool.clone()).expect("Failed to bind address");
+    let server = run(listener, connection_pool.clone(), email_client).expect("Failed to bind address");
     // 启动服务器作为后台任务
     // tokio::spawn返回一个指向spawned future的handle
     let _ = tokio::spawn(server);

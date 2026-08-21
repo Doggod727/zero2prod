@@ -438,8 +438,7 @@ parse方法是构建SubscriberName的唯一方法，任何SubscriberName实例�
 我们通过构造类型使得错误的使用方式无法被编译出来。
 这种技术叫做”类型驱动开发“。
 类型驱动开发：将我们试图建模的domain约束条件编码到类型系统中，并依靠编译器来确保这些约束得到执行。
-（我们的例子：String不为空的约束 -> SubscriberName）
-
+（我们的例子：String不为空的约束 -> SubscriberName
 ## ch6.5 所有权遇到不变量
 为什么不能将SubscriberName(String) -> SubscriberName(pub String)呢？
 1. 其他开发人员可以直接访问字段，构造一个不满足SubscriberName的约束条件的值
@@ -526,3 +525,134 @@ pub trait TryInto<T> {
 }
 ````
 
+
+# ch7 拒绝无效的订阅者（第二部分）
+## ch7.1 确认邮件
+我们通过第六章得到了邮件地址在格式上正确，但是并不知道它们是否真的存在，也就是是否真的有人用。
+唯一的确定给定邮件是否真的存在用户的方法是：发送真实地确认邮件。
+### ch7.1.1 订阅者的同意
+在推送邮件简报之前，我们需要发送一个邮件给该邮箱中，确保其真的需要订阅我们的邮件简报服务。
+### ch7.1.2 确认用户的流程
+每次用户想订阅邮件简报时，发出一个POST /subscriptions请求。
+请求处理器：
+1. 在subscriptions表中插入提供的详细信息，状态为pending_confirmation
+2. 生成唯一的subscription_token
+3. 在subscription_tokens表中id列存储subscription_token
+4. 向新的订阅者发送包含链接的电子邮件，链接为https://<our-api-domain>/subscriptions/confirm?token=<subscrption_token>
+5. 返回200 OK
+
+点击链接：
+1. 查询参数中检索subscriptions_token
+2. 从subscriptions_token中找到与subscription_token关联的订阅者id
+3. 在subscriptions表中将订阅者的状态从pending_confirm转换为active
+4. 返回200 OK
+### ch7.1.3 实现策略
+编写一个发送电子邮件的模块。
+调整现有的POST /subscriptions 请求处理器的逻辑
+从头开始编写GET /subscriptions/confirm
+## ch7.2 邮件发送组件——EmailClient
+### ch7.2.1 如何发送电子邮件
+虽然有专门的SMTP协议进行电子邮件的发送，但是对于开发来说，我们还是选择REST API程序。
+#### ch7.2.1.1 选择邮件API
+我们使用Postmark作为邮件API。
+#### ch7.2.1.2 邮件客户端接口
+我们希望有send_email方法。目前只负责每次发送一封电子邮件。
+send_email接受收件人的邮件地址，邮件主题，邮件内容三大参数，对于发件人邮件地址，其作为客户端本身构造函数的一部分。
+send_email本身作为异步函数设计。
+### ch7.2.2 如何使用reqwest编写REST客户端
+我们需要一个HTTP客户端与我们的REST API进行通讯。
+我们选择reqwest包。
+可以选择使用rustls支持TLS实现。
+#### ch7.2.2.1 reqwest::Client
+reqwest::Client 公开了我们执行REST API所需要的全部方法。
+Client::new创建一个新的实例。Client::Builder可以用来调整默认配置。
+#### ch7.2.2.2 连接池
+在对远程服务器上托管的API执行HTTP请求时，首先需要建立链接。
+如果每次执行一个新地请求都要重新建立链接，开销过大。并且可能由于过大的负载导致套接字耗尽的情况。
+所以我们使用连接池：一个连接池中存在多个链接，每一个链接都会存活一段时间。
+Client::clone不会创建一个新地连接池，而是复用。
+#### ch7.2.2.3 如何在actix-web中复用相同的reqwest::Client;
+如果要让一个Client作为应用程序状态的一部分，也就是多个worker都访问同一个client，我们可以使用app_data以及web::Data提取器。或者求为其派生出Clone trait。
+#### ch7.2.2.4 配置EmailClient
+要构建一个EmailClient实例，需要发出请求的API的基础URL和发件人的邮件地址。
+### ch7.2.3 如何测试EmailClient
+测试REST客户端是测试：HTTP调用是否真的发生了？如果检查请求头和请求体按照预期填充了。
+我们需要拦截HTTP请求——使用模拟服务器。
+#### ch7.2.3.1 使用wiremock进行HTTP模拟
+#### ch7.2.3.2 wiremock::MockServer
+wiremock::MockServer是一个完整的HTTP服务器。
+MockServer::start会向操作系统申请一个随机可用的端口，并在后台线程上启动服务器，准备监听传入的请求。
+MockServer::uri获取当前mock服务器的地址。
+#### ch7.2.3.3 wiremock:Mock
+默认情况下，wiremock::MockServer对于任意HTTP请求都是返回404 NOT FOUND。
+我们需要为其挂载Mock指示其如何处理选项。
+当wiremock::MockServer收到一个请求时，会遍历所有的挂载的mock，以检查是否与它们的条件匹配。
+Mock::given()指定匹配条件，any()表示任意匹配。
+respond_with(ResponseTemplate)指示返回的状态码。
+mount用来挂载。
+#### ch7.2.3.4 应当明确指定的意图。
+这里类似于属性测试，我们要测试的是send_email能够发送任何正确的邮件。
+#### ch7.2.3.5 mock的期望
+expect(1)表示在测试期间，MockServer之应该接受一个与mock设置匹配的请求。
+expect()限制测试期间MockServer接受的与mock设置匹配的请求数目。
+当MockServer在测试函数的末尾时，也就是要被析构了时候，检测是否满足期待。
+### ch7.2.4 EmailClient::send_email实现
+电子发送邮件示例：
+````
+curl "https://apipostmark.com/email"\
+ -X POST \
+ -H "Accept: application/json"
+ -H "Content-Tyep: applicatoin/json"
+ -H "X-Postmark-Server-Token: server token"
+ -d '{
+  "From": "sender@example.com",
+  "To": "reciever@example.com",
+  "Subject": "Postmark test",
+  "TextBody": "Hello dear Postmark user.",
+  "HtmlBody": "<html><body><strong>Hello</strong> dear Postmark user.</body></html>"
+  }'
+````
+#### ch7.2.4.1 reqwest::Client::post
+reqwest::Client提供了一个post方法，用来发送POST请求。返回一个RequestBuilder。对其调用流式API逐步构建出我们需要的其余部分。
+#### ch7.2.4.2 JSON请求体
+首先将请求体转化为结构体。
+如果启用了reqwest的json功能标志，builder将暴露一个json方法，我们可用使用他将request_body转换为请求的JSON请求体。
+#### ch7.2.4.3 授权令牌
+将令牌存储为EmailClient的一个字段。
+#### ch7.2.4.4 执行请求
+使用.send()方法发出请求。
+send 是一个异步的方法，并且是可能失败的方法。
+### ch7.2.5 加强正常的测试
+我们验证了REST 客户端确实发送了一个HTTP请求，接下来验证其请求头和请求体是否正确。
+1. 请求头，请求路径和请求方法
+我们可以使用header_exists来验证向服务器发出的请求是否设置了X-Postmark-Server-Token:
+我们可以使用and方法将多个守卫链接起来。
+2. 请求体
+如何验证请求体一切正常呢？
+body_json来精确匹配请求体。
+我们只需要检查请求体是有效的JSON，并且包含Postmark示例中显示的一组名字即可。
+WireMock暴露了一个Match trait，实现了该trait的所有东西都可以被用作匹配器在and和given中使用。
+我们需要将请求体反序列化为JSON，使用serde-json添加到依赖
+#### ch7.2.5.1 重构：避免不必要的内存开销
+SendEmailRequest拥有所有字段的所有权，所以我们构造请求体结构体时，额外存在内存开销，如果我们使用引用现有的数据，会好很多。
+### ch7.2.6 处理失败情况
+错误状态码
+响应速度慢
+这两个情况也要测试
+#### ch7.2.6.1 错误状态码
+当前只测试了是否发送了HTTP请求以及请求头请求体请求路径请求方法是否正确，没有测试服务器返回的状态是否是预期的。
+我们要确保，如果服务器返回200 OK, 则其返回值为Ok(())
+可能会返回错误的唯一步骤是send方法。
+如果发送请求时出现错误，检测到重定向或者到达重定向限制，该方法失效。
+基本上，只要从服务器获得有效的响应，send方法就会返回Ok，不管状态码如何。
+error_for_status()? 如果服务器返回的是400 - 599的状态码，Err
+如果是200 Ok。
+#### ch7.2.6.2 超时
+如果服务器返回200 Ok，但是响应时长过长，超时怎么办？
+我们可以指示模拟服务器返回响应之前等待一段时间，进行人工超时，send_email应该返回Err。
+经验法则：每当进行I/O操作时，都要设置超时时间。如果服务器的响应时长超过了超时时间，应该失败返回错误。
+如果超时时间设置过短，过多的超时重传导致服务器高负荷。
+过大，则可能对造成客户端性能下降，因为可能一个链接迟迟得不到释放，如果过多的请求触发，会造成socket耗尽。
+我们可以在Client上设置超时时间。
+#### ch7.2.6.3 测试辅助函数
+测试函数中存在多个重复部分。
