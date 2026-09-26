@@ -74,6 +74,15 @@ impl TestApp {
             plain_text
         }
     }
+    
+    pub async fn post_newsletters(&self, body: serde_json::Value) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(&format!("{}/newsletters", &self.address))
+            .json(&body)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
 }
 // 在后台某处启动应用程序
 // spawn_app 是唯一合理依赖应用程序代码的部分。其他的一切测试都与底层实现细节无关。

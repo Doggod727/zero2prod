@@ -7,7 +7,7 @@ use sqlx::postgres::PgPoolOptions;
 use tracing_actix_web::TracingLogger;
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{confirm, health_check};
+use crate::routes::{confirm, health_check, publish_newsletter};
 use crate::routes::subscribe;
 
 
@@ -70,6 +70,7 @@ pub fn run(listener: TcpListener, dp_pool: PgPool, email_client: EmailClient, ba
             .route("/health_check", web::get().to(health_check)) // web::get().to(health_check) => Route::new().guard(guard::Get()).to(health_check)
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
+            .route("/newsletters", web::post().to(publish_newsletter))
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())
             .app_data(email_client.clone())
