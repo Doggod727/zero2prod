@@ -8,6 +8,7 @@ use sqlx::postgres::PgSslMode;
 use crate::domain::SubscriberEmail;
 
 #[derive(serde::Deserialize)]
+#[derive(Clone)]
 pub struct Settings {
     pub database: DatabaseSettings, // 数据库链接配置
     pub application: ApplicationSettings, // 应用端口
@@ -15,6 +16,7 @@ pub struct Settings {
 }
 
 #[derive(serde::Deserialize)]
+#[derive(Clone)]
 pub struct DatabaseSettings {
     pub username: String,
     pub password: Secret<String>, // Secret通过反序列化逻辑委托给包装类型实现了Deserialize
@@ -26,10 +28,12 @@ pub struct DatabaseSettings {
     pub require_ssl: bool,
 }
 #[derive(serde::Deserialize)]
+#[derive(Clone)]
 pub struct ApplicationSettings {
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub port: u16,
     pub host: String,
+    pub base_url: String,
 }
 
 // 读取配置信息
@@ -109,17 +113,17 @@ impl TryFrom<String> for Environment {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct EmailClientSettings {
     pub base_url: String,
-    pub sender: String,
+    pub sender_email: String,
     pub authorization_token: Secret<String>,
     pub timeout_milliseconds: u64,
 }
 
 impl EmailClientSettings {
     pub fn sender(&self) -> Result<SubscriberEmail, String> {
-        Ok(SubscriberEmail::parse(self.sender.clone())?)
+        Ok(SubscriberEmail::parse(self.sender_email.clone())?)
     }
     
     pub fn timeout(&self) -> std::time::Duration {
