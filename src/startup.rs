@@ -1,9 +1,11 @@
 //! src/startup.rs
+use crate::authentication::reject_anonymous_users;
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
 use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe};
 use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
 use actix_web::dev::Server;
+use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer};
 use secrecy::Secret;
 use sqlx::postgres::PgPoolOptions;
@@ -100,12 +102,16 @@ pub async fn run(
             .route("/", web::get().to(home))
             .route("/login", web::post().to(login))
             .route("/login", web::get().to(login_form))
-            .route("/admin/dashboard", web::get().to(admin_dashboard))
-            .route("/admin/newsletters", web::get().to(newsletter_form))
-            .route("/admin/newsletters", web::post().to(publish_newsletter))
-            .route("/admin/password", web::get().to(change_password_form))
-            .route("/admin/password", web::post().to(change_password))
-            .route("/admin/logout", web::post().to(log_out))
+            .service(
+                web::scope("/admin")
+                    .wrap(from_fn(reject_anonymous_users))
+                    .route("/dashboard", web::get().to(admin_dashboard))
+                    .route("/newsletters", web::get().to(newsletter_form))
+                    .route("/newsletters", web::post().to(publish_newsletter))
+                    .route("/password", web::get().to(change_password_form))
+                    .route("/password", web::post().to(change_password))
+                    .route("/logout", web::post().to(log_out)),
+            )
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())
             .app_data(email_client.clone())

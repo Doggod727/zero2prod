@@ -1,10 +1,19 @@
 //! src/authentication.rs
+use crate::session_state::TypedSession;
 use crate::telemetry::spawn_blocking_with_tracing;
+use crate::utils::{e500, see_other};
+use actix_web::body::MessageBody;
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::error::InternalError;
+use actix_web::middleware::Next;
+use actix_web::{FromRequest, HttpMessage};
 use anyhow::Context;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use argon2::password_hash::SaltString;
 use secrecy::{ExposeSecret, Secret};
 use sqlx::PgPool;
+use std::ops::Deref;
+use uuid::Uuid;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
@@ -117,4 +126,42 @@ fn compute_password_hash(password: Secret<String>) -> Result<Secret<String>, any
         .hash_password(password.expose_secret().as_bytes(), &salt)?
         .to_string();
     Ok(Secret::new(password_hash))
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct UserId(Uuid);
+
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Deref for UserId {
+    type Target = Uuid;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub async fn reject_anonymous_users(
+    mut req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    let session = {
+        let (http_request, payload) = req.parts_mut();
+        TypedSession::from_request(http_request, payload).await
+    }?;
+
+    match session.get_user_id().map_err(e500)? {
+        Some(user_id) => {
+            req.extensions_mut().insert(UserId(user_id));
+            next.call(req).await
+        }
+        None => {
+            let response = see_other("/login");
+            let e = anyhow::anyhow!("The user has not logged in");
+            Err(InternalError::from_response(e, response).into())
+        }
+    }
 }
