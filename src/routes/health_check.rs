@@ -1,4 +1,4 @@
-use actix_web::{Responder, HttpResponse};
+use actix_web::{HttpResponse, Responder};
 // 健康检查端点
 pub async fn health_check() -> impl Responder {
     HttpResponse::Ok().finish()

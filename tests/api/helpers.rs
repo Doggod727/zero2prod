@@ -1,18 +1,18 @@
-use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 use argon2::password_hash::SaltString;
+use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 // ! tests/helpers.rs
-use sqlx::{Executor, PgConnection, PgPool, Connection};
-use zero2prod::configurations::{get_configurations, DatabaseSettings};
-use zero2prod::startup::{Application, get_connection_pool};
-use zero2prod::telemetry::{get_subscriber, init_subscriber};
 use once_cell::sync::Lazy;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 use uuid::Uuid;
 use wiremock::MockServer;
+use zero2prod::configurations::{get_configurations, DatabaseSettings};
+use zero2prod::startup::{get_connection_pool, Application};
+use zero2prod::telemetry::{get_subscriber, init_subscriber};
 
 // 使用once_cell确保tracing只能被初始化一次
 static TRACING: Lazy<()> = Lazy::new(|| {
     let default_filter_level = "info".to_string();
-    let subscriber_name ="test".to_string();
+    let subscriber_name = "test".to_string();
     // 由于'sink'是'get_subscriber'返回类型的一部分
     // 导致两个条件分支中'subscriber'的返回类型不一样
     // 因此没办法将其提取出来
@@ -50,11 +50,11 @@ impl TestUser {
         let password_hash = Argon2::new(
             Algorithm::Argon2id,
             Version::V0x13,
-             Params::new(15000, 2, 1, None).unwrap()
+            Params::new(15000, 2, 1, None).unwrap(),
         )
-            .hash_password(self.password.as_bytes(), &salt)
-            .unwrap()
-            .to_string();
+        .hash_password(self.password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
         sqlx::query!(
             "INSERT INTO users (user_id, username, password_hash)
                 VALUES($1, $2, $3)",
@@ -62,9 +62,9 @@ impl TestUser {
             self.username,
             password_hash
         )
-            .execute(pool)
-            .await
-            .expect("Failed to store test user");
+        .execute(pool)
+        .await
+        .expect("Failed to store test user");
     }
 }
 pub struct TestApp {
@@ -72,12 +72,13 @@ pub struct TestApp {
     pub db_pool: PgPool,
     pub email_server: MockServer,
     pub port: u16,
-    pub(crate) test_user: TestUser
+    pub(crate) test_user: TestUser,
+    pub api_client: reqwest::Client,
 }
 
 impl TestApp {
     pub async fn post_subscriptions(&self, body: String) -> reqwest::Response {
-        reqwest::Client::new()
+        self.api_client
             .post(&format!("{}/subscriptions", &self.address))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
@@ -87,10 +88,7 @@ impl TestApp {
     }
 
     /// 从发送给邮件API的邮件中提取出确认连接
-    pub fn get_confirmation_links(
-        &self,
-        email_request: &wiremock::Request
-    ) -> ConfirmationLinks {
+    pub fn get_confirmation_links(&self, email_request: &wiremock::Request) -> ConfirmationLinks {
         let body: serde_json::Value = serde_json::from_slice(&email_request.body).unwrap(); // 服务器发送的http请求的请求体
 
         // 从指定连接中提取连接
@@ -109,20 +107,43 @@ impl TestApp {
 
         let html = get_links(&body["HtmlBody"].as_str().unwrap());
         let plain_text = get_links(&body["TextBody"].as_str().unwrap());
-        ConfirmationLinks {
-            html,
-            plain_text
-        }
+        ConfirmationLinks { html, plain_text }
     }
 
     pub async fn post_newsletters(&self, body: serde_json::Value) -> reqwest::Response {
-        reqwest::Client::new()
+        self.api_client
             .post(&format!("{}/newsletters", &self.address))
             .basic_auth(&self.test_user.username, Some(&self.test_user.password))
             .json(&body)
             .send()
             .await
             .expect("Failed to execute request.")
+    }
+
+    pub async fn post_login<Body>(&self, body: &Body) -> reqwest::Response
+    where
+        Body: serde::Serialize,
+    {
+        // reqwest自动处理重定向
+        // 提交无效表单 -> 登录错误303
+        // 重定向到GET /login, 返回200
+        self.api_client
+            .post(&format!("{}/login", &self.address))
+            .form(body)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub async fn get_login_html(&self) -> String {
+        self.api_client
+            .get(&format!("{}/login", &self.address))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+            .text()
+            .await
+            .unwrap()
     }
 }
 // 在后台某处启动应用程序
@@ -135,7 +156,7 @@ pub async fn spawn_app() -> TestApp {
     // 为了测试的隔离性，随机化配置
     let configuration = {
         let mut c = get_configurations().expect("Failed to read configuration"); // 获取配置
-        // 为每一个测试获取不同的数据库
+                                                                                 // 为每一个测试获取不同的数据库
         c.database.database_name = Uuid::new_v4().to_string();
         // 使用系统提供的随机端口
         c.application.port = 0;
@@ -154,6 +175,11 @@ pub async fn spawn_app() -> TestApp {
     // 启动服务器作为后台任务
     // tokio::spawn返回一个指向spawned future的handle
     let _ = tokio::spawn(application.run_until_stopped());
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .cookie_store(true)
+        .build()
+        .unwrap();
     let test_app = TestApp {
         // 如何得到呢？
         address: format!("http://localhost:{}", application_port),
@@ -161,6 +187,7 @@ pub async fn spawn_app() -> TestApp {
         email_server,
         port: application_port,
         test_user: TestUser::generate(),
+        api_client: client
     };
     test_app.test_user.store(&test_app.db_pool).await;
     test_app
@@ -185,3 +212,7 @@ async fn configure_database(config: &DatabaseSettings) -> PgPool {
     connection_pool
 }
 
+pub fn assert_is_redirect_to(response: &reqwest::Response, location: &str) {
+    assert_eq!(response.status().as_u16(), 303);
+    assert_eq!(response.headers().get("LOCATION").unwrap(), location);
+}

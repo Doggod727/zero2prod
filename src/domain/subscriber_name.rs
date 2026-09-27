@@ -35,8 +35,6 @@ impl AsRef<str> for SubscriberName {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use crate::domain::subscriber_name::SubscriberName;

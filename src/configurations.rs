@@ -1,22 +1,20 @@
 //! src/configurations.rs
+use crate::domain::SubscriberEmail;
 use secrecy::{ExposeSecret, Secret};
 use serde::Deserialize;
 use serde_aux::field_attributes::deserialize_number_from_string;
-use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgSslMode;
-use crate::domain::SubscriberEmail;
+use sqlx::ConnectOptions;
 
-#[derive(serde::Deserialize)]
-#[derive(Clone)]
+#[derive(serde::Deserialize, Clone)]
 pub struct Settings {
-    pub database: DatabaseSettings, // 数据库链接配置
+    pub database: DatabaseSettings,       // 数据库链接配置
     pub application: ApplicationSettings, // 应用端口
     pub email_client: EmailClientSettings,
 }
 
-#[derive(serde::Deserialize)]
-#[derive(Clone)]
+#[derive(serde::Deserialize, Clone)]
 pub struct DatabaseSettings {
     pub username: String,
     pub password: Secret<String>, // Secret通过反序列化逻辑委托给包装类型实现了Deserialize
@@ -27,14 +25,13 @@ pub struct DatabaseSettings {
     // 确定是否要加密链接
     pub require_ssl: bool,
 }
-#[derive(serde::Deserialize)]
-#[derive(Clone)]
+#[derive(serde::Deserialize, Clone)]
 pub struct ApplicationSettings {
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub port: u16,
     pub host: String,
     pub base_url: String,
-    pub hmac_secret: Secret<String>
+    pub hmac_secret: Secret<String>,
 }
 
 // 读取配置信息
@@ -52,10 +49,18 @@ pub fn get_configurations() -> Result<Settings, config::ConfigError> {
     // 初始化配置读取器
     let settings = config::Config::builder()
         // 从一个叫做'configurations.yaml'的文件中读取配置值
-        .add_source(config::File::from(configuration_directory.join("base.yaml")))
-        .add_source(config::File::from(configuration_directory.join(&environment_file)))
+        .add_source(config::File::from(
+            configuration_directory.join("base.yaml"),
+        ))
+        .add_source(config::File::from(
+            configuration_directory.join(&environment_file),
+        ))
         // 从环境变量中添加设置(前缀为APP, _为分割符)
-        .add_source(config::Environment::with_prefix("APP").prefix_separator("_").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("APP")
+                .prefix_separator("_")
+                .separator("__"),
+        )
         .build()?;
     // 尝试将读取的类型转化为Settings类型
     settings.try_deserialize::<Settings>()
@@ -95,7 +100,7 @@ impl Environment {
     pub fn as_str(&self) -> &'static str {
         match self {
             Environment::Local => "local",
-            Environment::Production => "production"
+            Environment::Production => "production",
         }
     }
 }
@@ -107,9 +112,10 @@ impl TryFrom<String> for Environment {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
             "production" => Ok(Self::Production),
-            other => Err(
-                format!("{} is not a supported environment. Use either 'local' or 'production'.", other)
-            ),
+            other => Err(format!(
+                "{} is not a supported environment. Use either 'local' or 'production'.",
+                other
+            )),
         }
     }
 }
@@ -126,7 +132,7 @@ impl EmailClientSettings {
     pub fn sender(&self) -> Result<SubscriberEmail, String> {
         Ok(SubscriberEmail::parse(self.sender_email.clone())?)
     }
-    
+
     pub fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.timeout_milliseconds)
     }

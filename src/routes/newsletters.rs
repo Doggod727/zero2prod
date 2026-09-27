@@ -1,33 +1,33 @@
 //! src/routes/newsletters
 
-use std::fmt::Formatter;
-use actix_web::{web, HttpResponse, ResponseError};
-use sqlx::PgPool;
-use crate::routes::error_chain_fmt;
-use actix_web::http::StatusCode;
-use crate::email_client::EmailClient;
-use anyhow::Context;
-use crate::domain::SubscriberEmail;
-use secrecy::Secret;
-use actix_web::HttpRequest;
-use actix_web::http::header::{HeaderMap, HeaderValue};
-use reqwest::header;
 use crate::authentication::AuthError;
 use crate::authentication::{validate_credentials, Credentials};
+use crate::domain::SubscriberEmail;
+use crate::email_client::EmailClient;
+use crate::routes::error_chain_fmt;
+use actix_web::http::header::{HeaderMap, HeaderValue};
+use actix_web::http::StatusCode;
+use actix_web::HttpRequest;
+use actix_web::{web, HttpResponse, ResponseError};
+use anyhow::Context;
+use reqwest::header;
+use secrecy::Secret;
+use sqlx::PgPool;
+use std::fmt::Formatter;
 
 #[derive(serde::Deserialize)]
 pub struct BodyData {
     title: String,
-    content: Content
+    content: Content,
 }
 #[derive(serde::Deserialize)]
 pub struct Content {
     html: String,
-    text: String
+    text: String,
 }
 
 struct ConfirmedSubscriber {
-    email: SubscriberEmail
+    email: SubscriberEmail,
 }
 
 #[derive(thiserror::Error)]
@@ -35,7 +35,7 @@ pub enum PublishError {
     #[error("Authentication failed.")]
     AuthError(#[source] anyhow::Error),
     #[error(transparent)]
-    UnexpectedError(#[from] anyhow::Error)
+    UnexpectedError(#[from] anyhow::Error),
 }
 impl std::fmt::Debug for PublishError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -48,11 +48,10 @@ impl ResponseError for PublishError {
         match self {
             PublishError::UnexpectedError(_) => {
                 HttpResponse::new(StatusCode::INTERNAL_SERVER_ERROR)
-            },
+            }
             PublishError::AuthError(_) => {
                 let mut response = HttpResponse::new(StatusCode::UNAUTHORIZED);
-                let header_value = HeaderValue::from_str(r#"Basic realm="publish""#)
-                    .unwrap();
+                let header_value = HeaderValue::from_str(r#"Basic realm="publish""#).unwrap();
                 response
                     .headers_mut()
                     .insert(header::WWW_AUTHENTICATE, header_value);
@@ -87,7 +86,7 @@ fn basic_authentication(headers: &HeaderMap) -> Result<Credentials, anyhow::Erro
 
     Ok(Credentials {
         username,
-        password: Secret::new(password)
+        password: Secret::new(password),
     })
 }
 
@@ -96,24 +95,21 @@ fn basic_authentication(headers: &HeaderMap) -> Result<Credentials, anyhow::Erro
     skip(body, pool, email_client, request),
     fields(username=tracing::field::Empty, user_id=tracing::field::Empty)
 )]
-pub async fn publish_newsletter(body: web::Json<BodyData>, pool: web::Data<PgPool>,
+pub async fn publish_newsletter(
+    body: web::Json<BodyData>,
+    pool: web::Data<PgPool>,
     email_client: web::Data<EmailClient>,
-    request: HttpRequest) -> Result<HttpResponse, PublishError> {
-    let credentials = basic_authentication(request.headers())
-        .map_err(PublishError::AuthError)?;
-    tracing::Span::current().record(
-        "username",
-        &tracing::field::display(&credentials.username)
-    );
-    let user_id = validate_credentials(credentials, &pool).await
+    request: HttpRequest,
+) -> Result<HttpResponse, PublishError> {
+    let credentials = basic_authentication(request.headers()).map_err(PublishError::AuthError)?;
+    tracing::Span::current().record("username", &tracing::field::display(&credentials.username));
+    let user_id = validate_credentials(credentials, &pool)
+        .await
         .map_err(|e| match e {
             AuthError::InvalidCredentials(_) => PublishError::AuthError(e.into()),
-            AuthError::UnexpectedError(_) => PublishError::UnexpectedError(e.into())
+            AuthError::UnexpectedError(_) => PublishError::UnexpectedError(e.into()),
         })?;
-    tracing::Span::current().record(
-        "user_id",
-        &tracing::field::display(&user_id)
-    );
+    tracing::Span::current().record("user_id", &tracing::field::display(&user_id));
     let subscribers = get_confirmed_subscribers(&pool).await?;
     for subscriber in subscribers {
         match subscriber {
@@ -123,14 +119,11 @@ pub async fn publish_newsletter(body: web::Json<BodyData>, pool: web::Data<PgPoo
                         &subscriber.email,
                         &body.title,
                         &body.content.html,
-                        &body.content.text
-                    ).
-                    await
+                        &body.content.text,
+                    )
+                    .await
                     .with_context(|| {
-                        format!(
-                            "Failed to send newsletter issue to {}",
-                            subscriber.email
-                        )
+                        format!("Failed to send newsletter issue to {}", subscriber.email)
                     })?;
             }
             Err(error) => {
@@ -145,12 +138,9 @@ pub async fn publish_newsletter(body: web::Json<BodyData>, pool: web::Data<PgPoo
     Ok(HttpResponse::Ok().finish())
 }
 
-#[tracing::instrument(
-    name = "Get confirmed subscribers",
-    skip(pool)
-)]
+#[tracing::instrument(name = "Get confirmed subscribers", skip(pool))]
 async fn get_confirmed_subscribers(
-    pool: &PgPool
+    pool: &PgPool,
 ) -> Result<Vec<Result<ConfirmedSubscriber, anyhow::Error>>, anyhow::Error> {
     let confirmed_subscribers = sqlx::query!(
         r#"
@@ -159,13 +149,13 @@ async fn get_confirmed_subscribers(
         WHERE status = 'confirmed'
         "#,
     )
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|r| match SubscriberEmail::parse(r.email) {
-            Ok(email ) => Ok(ConfirmedSubscriber {email}),
-            Err(error) => Err(anyhow::anyhow!(error))
-        })
-        .collect();
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| match SubscriberEmail::parse(r.email) {
+        Ok(email) => Ok(ConfirmedSubscriber { email }),
+        Err(error) => Err(anyhow::anyhow!(error)),
+    })
+    .collect();
     Ok(confirmed_subscribers)
 }

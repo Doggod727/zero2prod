@@ -1,8 +1,8 @@
 //! test/api/newsletter.rs
 use crate::helpers::{spawn_app, ConfirmationLinks, TestApp};
+use uuid::Uuid;
 use wiremock::matchers::{any, method, path};
 use wiremock::{Mock, ResponseTemplate};
-use uuid::Uuid;
 
 #[tokio::test]
 async fn newsletters_are_not_delivered_to_unconfirmed_subscribers() {
@@ -68,13 +68,14 @@ async fn newsletters_returns_400_for_invalid_data() {
         ),
         (
             serde_json::json!({"title": "Newsletter"}),
-            "missing content"
-        )
+            "missing content",
+        ),
     ];
 
     for (invalid_body, error_message) in test_cases {
         let response = app.post_newsletters(invalid_body).await;
-        assert_eq!(400,
+        assert_eq!(
+            400,
             response.status().as_u16(),
             "The API did not fail with 400 Bad Request when the payload was {}.",
             error_message
@@ -137,7 +138,7 @@ async fn non_existing_user_is_rejected() {
 async fn invalid_password_is_rejected() {
     let app = spawn_app().await;
     let username = &app.test_user.username;
-    
+
     let password = Uuid::new_v4().to_string();
     assert_ne!(app.test_user.password, password);
 
