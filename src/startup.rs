@@ -1,8 +1,8 @@
 //! src/startup.rs
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{admin_dashboard, subscribe};
-use crate::routes::{confirm, health_check, home, login, login_form, publish_newsletter};
+use crate::routes::{admin_dashboard, change_password, change_password_form, subscribe};
+use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
 use actix_web::dev::Server;
 use actix_web::{web, App, HttpServer};
 use secrecy::Secret;
@@ -102,6 +102,9 @@ pub async fn run(
             .route("/login", web::post().to(login))
             .route("/login", web::get().to(login_form))
             .route("/admin/dashboard", web::get().to(admin_dashboard))
+            .route("/admin/password", web::get().to(change_password_form))
+            .route("/admin/password", web::post().to(change_password))
+            .route("/admin/logout", web::post().to(log_out))
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())
             .app_data(email_client.clone())

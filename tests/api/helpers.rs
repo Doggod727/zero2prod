@@ -42,7 +42,7 @@ impl TestUser {
         Self {
             user_id: Uuid::new_v4(),
             username: Uuid::new_v4().to_string(),
-            password: Uuid::new_v4().to_string(),
+            password: Uuid::new_v4().to_string()
         }
     }
     async fn store(&self, pool: &PgPool) {
@@ -65,6 +65,8 @@ impl TestUser {
         .execute(pool)
         .await
         .expect("Failed to store test user");
+        dbg!(&self.user_id);
+        dbg!(&password_hash);
     }
 }
 pub struct TestApp {
@@ -145,7 +147,7 @@ impl TestApp {
             .await
             .unwrap()
     }
-    
+
     pub async fn get_admin_dashboard(&self) -> reqwest::Response {
         self.api_client
             .get(&format!("{}/admin/dashboard", &self.address))
@@ -155,6 +157,36 @@ impl TestApp {
     }
     pub async fn get_admin_dashboard_html(&self) -> String {
         self.get_admin_dashboard().await.text().await.unwrap()
+    }
+
+    pub async fn get_change_password(&self) -> reqwest::Response {
+        self.api_client
+            .get(&format!("{}/admin/password", &self.address))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub async fn post_change_password<Body>(&self, body: &Body) -> reqwest::Response
+        where
+            Body: serde::Serialize {
+        self.api_client
+            .post(&format!("{}/admin/password", &self.address))
+            .form(&body)
+            .send()
+            .await
+            .expect("Failed to execute request")
+    }
+    pub async fn get_change_password_html(&self) -> String {
+        self.get_change_password().await.text().await.unwrap()
+    }
+    
+    pub async fn post_logout(&self) -> reqwest::Response {
+        self.api_client
+            .post(&format!("{}/admin/logout", &self.address))
+            .send()
+            .await
+            .expect("Failed to execute request")
     }
 }
 // 在后台某处启动应用程序
