@@ -7,11 +7,12 @@ use sqlx::postgres::PgPoolOptions;
 use tracing_actix_web::TracingLogger;
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{confirm, health_check, publish_newsletter};
+use crate::routes::{confirm, health_check, home, login, login_form, publish_newsletter};
 use crate::routes::subscribe;
+use secrecy::Secret;
 
-
-
+#[derive(Clone)]
+pub struct HmacSecret(pub Secret<String>);
 // 一个新的类型，用来保存新构建的服务器及其端口
 pub struct Application {
     port: u16,
@@ -38,7 +39,7 @@ impl Application {
         let address = format!("{}:{}", configuration.application.host, configuration.application.port);
         let listener = TcpListener::bind(address)?;
         let port = listener.local_addr()?.port();
-        let server = run(listener, connection_pool, email_client, configuration.application.base_url)?;
+        let server = run(listener, connection_pool, email_client, configuration.application.base_url, configuration.application.hmac_secret)?;
 
         // 将绑定值保存在Application结构体中
         Ok(Self {
@@ -58,7 +59,7 @@ impl Application {
 }
 // 使用包装类型，便于'subscribe'中获取URL
 pub struct ApplicationBaseUrl(pub String);
-pub fn run(listener: TcpListener, dp_pool: PgPool, email_client: EmailClient, base_url: String) -> Result<Server, std::io::Error>{
+pub fn run(listener: TcpListener, dp_pool: PgPool, email_client: EmailClient, base_url: String, hmac_secret: Secret<String>) -> Result<Server, std::io::Error>{
     let dp_pool = web::Data::new(dp_pool); // 创建一个链接的智能指针
     let email_client = web::Data::new(email_client);
     let base_url = web::Data::new(ApplicationBaseUrl(base_url));
@@ -71,10 +72,14 @@ pub fn run(listener: TcpListener, dp_pool: PgPool, email_client: EmailClient, ba
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
             .route("/newsletters", web::post().to(publish_newsletter))
+            .route("/", web::get().to(home))
+            .route("/login", web::post().to(login))
+            .route("/login", web::get().to(login_form))
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())
             .app_data(email_client.clone())
             .app_data(base_url.clone())
+            .app_data(web::Data::new(HmacSecret(hmac_secret.clone())))
     })
         .listen(listener)?
         .run();

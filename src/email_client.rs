@@ -128,7 +128,7 @@ mod tests {
             .await;
         
         // 执行
-        let _ = email_client.send_email(email() ,&subject(), &content(), &content())
+        let _ = email_client.send_email(&email() ,&subject(), &content(), &content())
             .await;
     }
 
@@ -147,7 +147,7 @@ mod tests {
             .await;
 
         // 执行
-        let outcome = email_client.send_email(email(), &subject(), &content(), &content())
+        let outcome = email_client.send_email(&email(), &subject(), &content(), &content())
             .await;
         assert_ok!(outcome);
     }
@@ -167,7 +167,7 @@ mod tests {
             .await;
 
         // 执行
-        let outcome = email_client.send_email(email(), &subject(), &content(), &content())
+        let outcome = email_client.send_email(&email(), &subject(), &content(), &content())
             .await;
         assert_err!(outcome);
     }
@@ -186,7 +186,7 @@ mod tests {
             .mount(&mock_server)
             .await;
         
-        let outcome = email_client.send_email(email(), &subject(), &content(), &content())
+        let outcome = email_client.send_email(&email(), &subject(), &content(), &content())
             .await;
         assert_err!(outcome);
     }
