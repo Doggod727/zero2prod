@@ -1,7 +1,7 @@
 //! src/startup.rs
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{admin_dashboard, change_password, change_password_form, subscribe};
+use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe};
 use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
 use actix_web::dev::Server;
 use actix_web::{web, App, HttpServer};
@@ -97,11 +97,12 @@ pub async fn run(
             .route("/health_check", web::get().to(health_check)) // web::get().to(health_check) => Route::new().guard(guard::Get()).to(health_check)
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
-            .route("/newsletters", web::post().to(publish_newsletter))
             .route("/", web::get().to(home))
             .route("/login", web::post().to(login))
             .route("/login", web::get().to(login_form))
             .route("/admin/dashboard", web::get().to(admin_dashboard))
+            .route("/admin/newsletters", web::get().to(newsletter_form))
+            .route("/admin/newsletters", web::post().to(publish_newsletter))
             .route("/admin/password", web::get().to(change_password_form))
             .route("/admin/password", web::post().to(change_password))
             .route("/admin/logout", web::post().to(log_out))
