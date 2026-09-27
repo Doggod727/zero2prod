@@ -145,6 +145,17 @@ impl TestApp {
             .await
             .unwrap()
     }
+    
+    pub async fn get_admin_dashboard(&self) -> reqwest::Response {
+        self.api_client
+            .get(&format!("{}/admin/dashboard", &self.address))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+    pub async fn get_admin_dashboard_html(&self) -> String {
+        self.get_admin_dashboard().await.text().await.unwrap()
+    }
 }
 // 在后台某处启动应用程序
 // spawn_app 是唯一合理依赖应用程序代码的部分。其他的一切测试都与底层实现细节无关。

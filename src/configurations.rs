@@ -12,6 +12,7 @@ pub struct Settings {
     pub database: DatabaseSettings,       // 数据库链接配置
     pub application: ApplicationSettings, // 应用端口
     pub email_client: EmailClientSettings,
+    pub redis_uri: Secret<String>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -33,7 +34,6 @@ pub struct ApplicationSettings {
     pub base_url: String,
     pub hmac_secret: Secret<String>,
 }
-
 // 读取配置信息
 pub fn get_configurations() -> Result<Settings, config::ConfigError> {
     let base_path = std::env::current_dir().expect("Failed to determine the current directory");

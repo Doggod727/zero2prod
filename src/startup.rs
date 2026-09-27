@@ -1,7 +1,7 @@
 //! src/startup.rs
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::subscribe;
+use crate::routes::{admin_dashboard, subscribe};
 use crate::routes::{confirm, health_check, home, login, login_form, publish_newsletter};
 use actix_web::dev::Server;
 use actix_web::{web, App, HttpServer};
@@ -14,6 +14,8 @@ use actix_web_flash_messages::FlashMessagesFramework;
 use actix_web_flash_messages::storage::CookieMessageStore;
 use secrecy::ExposeSecret;
 use actix_web::cookie::Key;
+use actix_session::SessionMiddleware;
+use actix_session::storage::RedisSessionStore;
 #[derive(Clone)]
 pub struct HmacSecret(pub Secret<String>);
 // 一个新的类型，用来保存新构建的服务器及其端口
@@ -24,7 +26,7 @@ pub struct Application {
 
 impl Application {
     // 我们将build函数转换为Application的构造函数
-    pub async fn build(configuration: Settings) -> Result<Application, std::io::Error> {
+    pub async fn build(configuration: Settings) -> Result<Application, anyhow::Error> {
         let connection_pool = get_connection_pool(&configuration.database);
 
         // 使用configuration构建一个EmailClient
@@ -52,7 +54,8 @@ impl Application {
             email_client,
             configuration.application.base_url,
             configuration.application.hmac_secret,
-        )?;
+            configuration.redis_uri
+        ).await?;
 
         // 将绑定值保存在Application结构体中
         Ok(Self { port, server })
@@ -69,24 +72,28 @@ impl Application {
 }
 // 使用包装类型，便于'subscribe'中获取URL
 pub struct ApplicationBaseUrl(pub String);
-pub fn run(
+pub async fn run(
     listener: TcpListener,
     dp_pool: PgPool,
     email_client: EmailClient,
     base_url: String,
     hmac_secret: Secret<String>,
-) -> Result<Server, std::io::Error> {
-    let message_store = CookieMessageStore::builder(Key::from(hmac_secret.expose_secret().as_bytes())).build();
+    redis_uri: Secret<String>
+) -> Result<Server, anyhow::Error> {
+    let secret_key = Key::from(hmac_secret.expose_secret().as_bytes());
+    let message_store = CookieMessageStore::builder(secret_key.clone()).build();
     let message_framework = FlashMessagesFramework::builder(message_store).build();
     let dp_pool = web::Data::new(dp_pool); // 创建一个链接的智能指针
     let email_client = web::Data::new(email_client);
     let base_url = web::Data::new(ApplicationBaseUrl(base_url));
+    let redis_store = RedisSessionStore::new(redis_uri.expose_secret()).await?;
     let server = HttpServer::new(move || {
         App::new()
             // 将中间件通过'wrap'方法加入到'App'中
             // 替代Logger::default()
             .wrap(TracingLogger::default())
             .wrap(message_framework.clone())
+            .wrap(SessionMiddleware::new(redis_store.clone(), secret_key.clone()))
             .route("/health_check", web::get().to(health_check)) // web::get().to(health_check) => Route::new().guard(guard::Get()).to(health_check)
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
@@ -94,6 +101,7 @@ pub fn run(
             .route("/", web::get().to(home))
             .route("/login", web::post().to(login))
             .route("/login", web::get().to(login_form))
+            .route("/admin/dashboard", web::get().to(admin_dashboard))
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())
             .app_data(email_client.clone())
