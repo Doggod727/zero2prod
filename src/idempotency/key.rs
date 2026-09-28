@@ -14,7 +14,7 @@ impl TryFrom<String> for IdempotencyKey {
                 "The idempotency key must be shorter than {max_length} characters"
             );
         }
-        Ok(Self(s))
+        Ok(Self(value))
     }
 }
 

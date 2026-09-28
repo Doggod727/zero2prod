@@ -2,12 +2,13 @@
 use crate::helpers::{assert_is_redirect_to, spawn_app, ConfirmationLinks, TestApp};
 use wiremock::matchers::{any, method, path};
 use wiremock::{Mock, ResponseTemplate};
-
+use std::time::Duration;
 fn newsletter_request_body() -> serde_json::Value {
     serde_json::json!({
         "title": "Newsletter title",
         "text_content": "Newsletter body as plain text",
         "html_content": "<p>Newsletter body as HTML</p>",
+        "idempotency_key": uuid::Uuid::new_v4().to_string(),
     })
 }
 
@@ -29,7 +30,7 @@ async fn newsletters_are_not_delivered_to_unconfirmed_subscribers() {
 
     let html_page = app.get_newsletters_html().await;
     assert!(html_page.contains(
-        "<p><i>The newsletter issue has been accepted - emails will go out shortly.</i></p>"
+        "<p><i>The newsletter issue has been published</i></p>"
     ));
 }
 #[tokio::test]
@@ -97,7 +98,7 @@ async fn newsletter_creation_is_idempotent() {
     let app = spawn_app().await;
     create_confirmed_subscriber(&app).await;
     app.test_user.login(&app).await;
-
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
     Mock::given(path("/email"))
         .and(method("POST"))
         .respond_with(ResponseTemplate::new(200))
@@ -108,20 +109,24 @@ async fn newsletter_creation_is_idempotent() {
     let newsletter_request_body = serde_json::json!({
         "title": "Newsletter title",
         "text_content": "Newsletter body as plain text",
-        "html_content": "<p>Newsletter body as HTML</p>"
+        "html_content": "<p>Newsletter body as HTML</p>",
+        "idempotency_key": idempotency_key,
     });
     let response = app.post_newsletters(newsletter_request_body).await;
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     let html_page = app.get_newsletters_html().await;
     assert!(
-        html_page.contains("<p><i>The newsletter issue has been published!</i></p>")
+        html_page.contains(
+            "<p><i>The newsletter issue has been published</i></p>"
+        )
     );
 
     let newsletter_request_body = serde_json::json!({
         "title": "Newsletter title",
         "text_content": "Newsletter body as plain text",
-        "html_content": "<p>Newsletter body as HTML</p>"
+        "html_content": "<p>Newsletter body as HTML</p>",
+        "idempotency_key": idempotency_key,
     });
     let response = app.post_newsletters(newsletter_request_body).await;
 
@@ -129,8 +134,45 @@ async fn newsletter_creation_is_idempotent() {
 
     let html_page = app.get_newsletters_html().await;
     assert!(
-        html_page.contains("<p><i>The newsletter issue has been published!</i></p>")
+        html_page.contains(
+            "<p><i>The newsletter issue has been published</i></p>"
+        )
     );
+}
+
+#[tokio::test]
+async fn concurrent_form_submission_is_handled_gracefully() {
+     let app = spawn_app().await;
+    create_confirmed_subscriber(&app).await;
+    app.test_user.login(&app).await;
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .expect(1)
+        .mount(&app.email_server)
+        .await;
+
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+    let newsletter_request_body = serde_json::json!({
+        "title": "Newsletter title",
+        "text_content": "Newsletter body as plain text",
+        "html_content": "<p>Newsletter body as HTML</p>",
+        "idempotency_key": idempotency_key
+    });
+
+    let response1 = app.post_newsletters(newsletter_request_body);
+    let newsletter_request_body = serde_json::json!({
+        "title": "Newsletter title",
+        "text_content": "Newsletter body as plain text",
+        "html_content": "<p>Newsletter body as HTML</p>",
+        "idempotency_key": idempotency_key
+    });
+    let response2 = app.post_newsletters(newsletter_request_body);
+    let (response1, response2) = tokio::join!(response1, response2);
+
+    assert_eq!(response1.status(), response2.status());
+    assert_eq!(response1.text().await.unwrap(), response2.text().await.unwrap());
 }
 async fn create_unconfirmed_subscriber(app: &TestApp) -> ConfirmationLinks {
     let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
