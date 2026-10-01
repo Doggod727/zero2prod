@@ -16,7 +16,7 @@ pub async fn change_password_form(user_id: web::ReqData<UserId>, flash_messages:
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meat http-equiv="content-type", content="text/html; charset=utf-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
     <title>Change Password</title>
 </head>
 <body>
@@ -48,7 +48,7 @@ pub async fn change_password_form(user_id: web::ReqData<UserId>, flash_messages:
         <br>
         <button type="submit">Change password</button>
     </form>
-    <p><a href="/admin/dashboard"><- Back</a></p>
+    <p><a href="/admin/dashboard">&lt;- Back</a></p>
 </body>
 </html>"#
     )))
