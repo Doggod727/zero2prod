@@ -1,6 +1,76 @@
 {
   "db": "PostgreSQL",
-  "fc883f862e69655168ffd0ba12cf389f786771b70519a110595b0ab18ddd4019": {
+  "0a828e730514c8aa63ecaf9d36d8e0ecb9493e179a320affcfdcf582535ba2b8": {
+    "describe": {
+      "columns": [
+        {
+          "name": "delivery_id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "task_type",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "recipient",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "newsletter_issue_id",
+          "ordinal": 3,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "subscription_token",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "attempts",
+          "ordinal": 5,
+          "type_info": "Int4"
+        },
+        {
+          "name": "last_error",
+          "ordinal": 6,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Float8"
+        ]
+      }
+    },
+    "query": "\n                UPDATE email_delivery_queue\n                SET next_retry_at = now() + make_interval(secs => $1),\n                    attempts = attempts + 1\n                WHERE delivery_id = (\n                    SELECT delivery_id\n                    FROM email_delivery_queue e\n                    WHERE next_retry_at <= now()\n                    FOR UPDATE\n                    SKIP LOCKED\n                    LIMIT 1\n                )\n                RETURNING delivery_id, task_type, recipient, newsletter_issue_id,\n                          subscription_token, attempts, last_error\n                "
+  },
+  "119403942f45f5a80a3b3005a5f8817e32e640d0315e24e3c6eb2799d12a29de": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Float8",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        UPDATE email_delivery_queue\n        SET next_retry_at = now() + make_interval(secs => $2::float8),\n            last_error = $3\n        WHERE delivery_id = $1\n        "
+  },
+  "17233368e5a9fa9de96ce3c983ed62c0ea7e0dd7f22e3751511d4bd232320c27": {
     "describe": {
       "columns": [],
       "nullable": [],
@@ -9,10 +79,341 @@
           "Uuid",
           "Text",
           "Text",
+          "Uuid",
+          "Text",
+          "Int4",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO dead_letter_queue\n            (delivery_id, task_type, recipient, newsletter_issue_id,\n             subscription_token, attempts, last_error)\n        VALUES ($1, $2, $3, $4, $5, $6, $7)\n        "
+  },
+  "2880480077b654e38b63f423ab40680697a500ffe1af1d1b39108910594b581b": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        UPDATE users\n        SET password_hash = $1\n        WHERE user_id = $2\n        "
+  },
+  "33b11051e779866db9aeb86d28a59db07a94323ffdc59a5a2c1da694ebe9a65f": {
+    "describe": {
+      "columns": [
+        {
+          "name": "username",
+          "ordinal": 0,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        SELECT username\n        FROM users\n        WHERE user_id = $1\n        "
+  },
+  "38ba903ad605b1dcbbae874b3bda0833c360ea3a31a7944a49aaab37cf3799aa": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text",
+          "Int2",
+          {
+            "Custom": {
+              "kind": {
+                "Array": {
+                  "Custom": {
+                    "kind": {
+                      "Composite": [
+                        [
+                          "name",
+                          "Text"
+                        ],
+                        [
+                          "value",
+                          "Bytea"
+                        ]
+                      ]
+                    },
+                    "name": "header_pair"
+                  }
+                }
+              },
+              "name": "_header_pair"
+            }
+          },
+          "Bytea"
+        ]
+      }
+    },
+    "query": "\n        UPDATE idempotency\n        SET\n            response_status_code = $3,\n            response_headers = $4,\n            response_body = $5\n        WHERE\n            user_id = $1 AND\n            idempotency_key = $2\n        "
+  },
+  "39a46dd2d7fd7f96e989b6fd729e59a39152eca16501f28cbbb88a16e66b5602": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text",
+          "Text",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO newsletter_issues(\n            newsletter_issue_id, title, text_content, html_content, published_at\n        )\n        VALUES ($1, $2, $3, $4, now())\n        "
+  },
+  "57a1be7b14d0efbdabcb6fa5a1d7d6bb3ac080e92f5d66763695d4bcdf83a582": {
+    "describe": {
+      "columns": [
+        {
+          "name": "response_status_code!",
+          "ordinal": 0,
+          "type_info": "Int2"
+        },
+        {
+          "name": "response_headers!: Vec<HeaderPairRecord>",
+          "ordinal": 1,
+          "type_info": {
+            "Custom": {
+              "kind": {
+                "Array": {
+                  "Custom": {
+                    "kind": {
+                      "Composite": [
+                        [
+                          "name",
+                          "Text"
+                        ],
+                        [
+                          "value",
+                          "Bytea"
+                        ]
+                      ]
+                    },
+                    "name": "header_pair"
+                  }
+                }
+              },
+              "name": "_header_pair"
+            }
+          }
+        },
+        {
+          "name": "response_body!",
+          "ordinal": 2,
+          "type_info": "Bytea"
+        }
+      ],
+      "nullable": [
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        SELECT\n            response_status_code as \"response_status_code!\",\n            response_headers as \"response_headers!: Vec<HeaderPairRecord>\",\n            response_body as \"response_body!\"\n        FROM idempotency\n        WHERE\n            user_id = $1 AND\n            idempotency_key = $2\n        "
+  },
+  "5eb929093bb0ab9526ddc4dfd65a809d0e8d391becb4f55ddda221db6400602a": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        DELETE FROM email_delivery_queue\n        WHERE delivery_id = $1\n        "
+  },
+  "78f3c81379eed5632047f71c367208667c2aa153746424c6d9fbf1ce343e5c89": {
+    "describe": {
+      "columns": [
+        {
+          "name": "subscriber_id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        }
+      ],
+      "nullable": [
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Text"
+        ]
+      }
+    },
+    "query": "SELECT subscriber_id FROM subscription_tokens WHERE subscription_token = $1 AND expire_at > now()"
+  },
+  "83780a7736341c8b9678aaca297f765218f34c93353d4a55e8e8703bf841feda": {
+    "describe": {
+      "columns": [
+        {
+          "name": "title",
+          "ordinal": 0,
+          "type_info": "Text"
+        },
+        {
+          "name": "text_content",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "html_content",
+          "ordinal": 2,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        SELECT title, text_content, html_content\n        FROM newsletter_issues\n        WHERE \n            newsletter_issue_id = $1\n        "
+  },
+  "8a7e7a5efc5e4f9ecf80aefd2041841441b703c57dfaad9e81e60f4f0d80ec06": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO email_delivery_queue(task_type, recipient, subscription_token)\n        VALUES ('confirmation', $1, $2)\n        ON CONFLICT(recipient) WHERE task_type = 'confirmation'\n        DO UPDATE SET subscription_token = EXCLUDED.subscription_token,\n                      attempts = 0,\n                      next_retry_at = now(),\n                      last_error = NULL\n        "
+  },
+  "a7849223b6653cf268132f85548cc6688086f7d2ef3ed7abad82dfa62e64e8f3": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Uuid",
           "Timestamptz"
         ]
       }
     },
-    "query": "\n        INSERT INTO subscriptions (id, email, name, subscribed_at)\n        VALUES ($1, $2, $3, $4)"
+    "query": "\n        INSERT INTO subscription_tokens (subscription_token, subscriber_id, expire_at)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (subscriber_id) DO UPDATE\n        SET subscription_token = EXCLUDED.subscription_token,\n            expire_at = EXCLUDED.expire_at\n        "
+  },
+  "acf1b96c82ddf18db02e71a0e297c822b46f10add52c54649cf599b883165e58": {
+    "describe": {
+      "columns": [
+        {
+          "name": "user_id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "password_hash",
+          "ordinal": 1,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        SELECT user_id, password_hash\n        FROM users\n        WHERE username = $1\n        "
+  },
+  "c5b7d1e933b18e817f9b9a580196c09c4bb486fdf0e63b460f6b925a63d578ba": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO email_delivery_queue(task_type, recipient, newsletter_issue_id)\n        SELECT 'newsletter', email, $1\n        FROM subscriptions\n        WHERE status = 'confirmed'\n        "
+  },
+  "cabd3048916e39e3d8e4c178ad94aae7aeceea4fdfd22620949105ad83e32bc6": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "status",
+          "ordinal": 1,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text",
+          "Text",
+          "Timestamptz",
+          "Text",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO subscriptions (id, email, name, subscribed_at, status)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (email)\n        DO UPDATE SET name = EXCLUDED.name\n        WHERE subscriptions.status <> $6\n        RETURNING id, status\n        "
+  },
+  "ede0cc593f1937b6c9d091d02276d8eeb6984b963a045b17d46ae907f5cdffb3": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO idempotency(user_id, idempotency_key, create_at)\n        VALUES ($1, $2, now())\n        ON CONFLICT DO NOTHING\n        "
+  },
+  "eeca1717063c04ecfc7f591982d0e3f7793df299f7b47b89f62297240c1d5866": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "UPDATE subscriptions SET status = 'confirmed' WHERE id = $1 "
   }
 }

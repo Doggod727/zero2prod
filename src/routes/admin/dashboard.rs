@@ -23,6 +23,7 @@ pub async fn admin_dashboard(user_id: web::ReqData<UserId>, pool: web::Data<PgPo
     <ol>
         <li><a href="/admin/password">Change password</a></li>
         <li><a href="/admin/newsletters">Send a newsletter issue</a></li>
+        <li><a href="/admin/subscribers">Get subscribers list</a></li>
         <li>
             <form name="logoutForm" action="/admin/logout" method="post">
                 <input type="submit" value="Logout">

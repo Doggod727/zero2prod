@@ -2,7 +2,7 @@
 use crate::authentication::reject_anonymous_users;
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe};
+use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe, subscribers_list};
 use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
 use crate::routes::subscription_form;
 use actix_web::dev::Server;
@@ -114,7 +114,8 @@ pub async fn run(
                     .route("/newsletters", web::post().to(publish_newsletter))
                     .route("/password", web::get().to(change_password_form))
                     .route("/password", web::post().to(change_password))
-                    .route("/logout", web::post().to(log_out)),
+                    .route("/logout", web::post().to(log_out))
+                    .route("/subscribers", web::get().to(subscribers_list))
             )
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())

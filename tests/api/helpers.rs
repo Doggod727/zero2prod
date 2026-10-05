@@ -183,6 +183,19 @@ impl TestApp {
         self.get_subscriptions().await.text().await.unwrap()
     }
 
+    /// GET /admin/subscribers —— 订阅者列表（可带游标）
+    pub async fn get_subscribers_page(&self, query: &str) -> reqwest::Response {
+        self.api_client
+            .get(&format!("{}/admin/subscribers{}", &self.address, query))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub async fn get_subscribers_html(&self, query: &str) -> String {
+        self.get_subscribers_page(query).await.text().await.unwrap()
+    }
+
     /// 从发送给邮件API的邮件中提取出确认连接
     pub fn get_confirmation_links(&self, email_request: &wiremock::Request) -> ConfirmationLinks {
         let body: serde_json::Value = serde_json::from_slice(&email_request.body).unwrap(); // 服务器发送的http请求的请求体
