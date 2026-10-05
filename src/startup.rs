@@ -4,6 +4,7 @@ use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
 use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe};
 use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
+use crate::routes::subscription_form;
 use actix_web::dev::Server;
 use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer};
@@ -97,6 +98,9 @@ pub async fn run(
             .wrap(message_framework.clone())
             .wrap(SessionMiddleware::new(redis_store.clone(), secret_key.clone()))
             .route("/health_check", web::get().to(health_check)) // web::get().to(health_check) => Route::new().guard(guard::Get()).to(health_check)
+            // GET 渲染表单；POST 处理提交。POST 结束后 303 回来这里，
+            // 用户才能看到 Flash 消息（PRG 模式，F5 不会重复提交）。
+            .route("/subscriptions", web::get().to(subscription_form))
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
             .route("/", web::get().to(home))

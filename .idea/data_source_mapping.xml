@@ -2,7 +2,6 @@
 <project version="4">
   <component name="DataSourcePerFileMappings">
     <file url="file://$PROJECT_DIR$/migrations/20260816155948_create_subscriptions_table.sql" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
-    <file url="file://$PROJECT_DIR$/src/routes/subscriptions.rs" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
-    <file url="file://$PROJECT_DIR$/src/routes/subscriptions_confirm.rs" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
+    <file url="file://$PROJECT_DIR$/migrations/20261002123352_subscriptions_status_range.sql" value="f774b8f0-de41-4e18-aa69-b6639d793de8" />
   </component>
 </project>

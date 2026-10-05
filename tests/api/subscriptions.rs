@@ -19,8 +19,11 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
         .await;
     let response = test_app.post_subscriptions(body.into()).await;
 
-    // 断言
-    assert_eq!(200, response.status().as_u16()); // 测试对应正确的数据，发送给POST /subscriptions端点，服务器能够正确解析，并且发送一个确认邮件，然后返回200
+    assert_eq!(303, response.status().as_u16());
+    assert_eq!(
+        response.headers().get("LOCATION").unwrap(),
+        "/subscriptions"
+    );
 }
 #[tokio::test]
 pub async fn subscribe_persists_the_new_subscriber() {
@@ -139,4 +142,267 @@ async fn subscribe_fails_if_there_is_a_fatal_database_error() {
     let response = app.post_subscriptions(body.into()).await;
 
     assert_eq!(response.status().as_u16(), 500);
+}
+
+// ============================================================================
+// P0: 订阅接口的自然键幂等（重复提交 / 已确认 / 发信失败后重试）
+// ============================================================================
+
+/// 同一个邮箱提交两次：只落一行，且两次都返回 303（跳回表单页）。
+/// 改造前第二次会撞 email 唯一约束 → 500（这就是 P0 要修的 bug）。
+#[tokio::test]
+async fn subscribe_is_idempotent_for_the_same_email() {
+    let app = spawn_app().await;
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&app.email_server)
+        .await;
+
+    let first = app.post_subscriptions(body.into()).await;
+    assert_eq!(303, first.status().as_u16(), "第一次订阅应当成功");
+
+    let second = app.post_subscriptions(body.into()).await;
+    assert_eq!(
+        303,
+        second.status().as_u16(),
+        "重复订阅不应该失败（改造前这里是 500）"
+    );
+
+    let saved = sqlx::query!(
+        "SELECT count(*) AS count FROM subscriptions WHERE email = $1",
+        "ursula_le_guin@gmail.com"
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to count subscriptions.");
+    assert_eq!(saved.count, Some(1), "重复订阅不应该产生第二行");
+
+    let status = sqlx::query!(
+        "SELECT status FROM subscriptions WHERE email = $1",
+        "ursula_le_guin@gmail.com"
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to fetch status.");
+    assert_eq!(status.status, "pending_confirmation");
+}
+
+/// 已确认的订阅者再次提交：返回 303 跳转，并且【不重发】邮件、【不改动】记录。
+/// 用 expect(0) 的 mock 断言"一封都没发"。
+#[tokio::test]
+async fn subscribe_does_not_resend_or_modify_when_already_confirmed() {
+    let app = spawn_app().await;
+    let email = "ursula_le_guin@gmail.com";
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    // 预先造一个已确认的订阅者
+    sqlx::query!(
+        "INSERT INTO subscriptions (id, email, name, subscribed_at, status)
+         VALUES ($1, $2, $3, now(), 'confirmed')",
+        uuid::Uuid::new_v4(),
+        email,
+        "le guin"
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to insert a confirmed subscriber.");
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&app.email_server)
+        .await;
+
+    let response = app.post_subscriptions(body.into()).await;
+    let status = response.status().as_u16();
+    assert_eq!(
+        303,
+        status,
+        "已确认的订阅者再次提交应当返回 303（实际 {}），响应体: {:?}",
+        status,
+        response.text().await
+    );
+
+    let saved = sqlx::query!(
+        "SELECT count(*) AS count, min(status) AS status FROM subscriptions WHERE email = $1",
+        email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to fetch subscription.");
+    assert_eq!(saved.count, Some(1));
+    assert_eq!(saved.status.as_deref(), Some("confirmed"));
+
+    let tokens = sqlx::query!("SELECT count(*) AS count FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to count tokens.");
+    assert_eq!(tokens.count, Some(0), "已确认的订阅者不该再生成 token");
+}
+
+/// 第一次发信失败（邮件服务返回 500）后，用户重试能够成功收到新的确认邮件，
+/// 而且旧 token 会被轮换掉（同一个订阅者只留一行 token）。
+#[tokio::test]
+async fn subscribe_can_recover_from_a_failed_confirmation_email() {
+    let app = spawn_app().await;
+    let email = "ursula_le_guin@gmail.com";
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    // 只在第一次请求时返回 500；之后交给下面挂的 200 mock
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&app.email_server)
+        .await;
+
+    let first = app.post_subscriptions(body.into()).await;
+    assert_ne!(
+        200,
+        first.status().as_u16(),
+        "发信失败时不应该返回 200（尽力投递失败）"
+    );
+
+    // 订阅者已经落库，并且拿到了一个 token
+    let after_first = sqlx::query!(
+        "SELECT status FROM subscriptions WHERE email = $1",
+        email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("订阅者应当已经落库，否则用户重试还是会撞唯一约束");
+    assert_eq!(after_first.status, "pending_confirmation");
+
+    let first_token = sqlx::query!("SELECT subscription_token FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("第一次就应该已经写入 token")
+        .subscription_token;
+
+    // 邮件服务恢复正常
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&app.email_server)
+        .await;
+
+    let second = app.post_subscriptions(body.into()).await;
+    let status = second.status().as_u16();
+    assert_eq!(
+        303,
+        status,
+        "邮件服务恢复后，重试应当成功并 303 跳回表单页（实际 {}），响应体: {:?}",
+        status,
+        second.text().await
+    );
+
+    let count = sqlx::query!(
+        "SELECT count(*) AS count FROM subscriptions WHERE email = $1",
+        email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to count subscriptions.");
+    assert_eq!(count.count, Some(1), "重试不应该产生第二行订阅者");
+
+    // token 被轮换：仍然只有一行，而且值变了
+    let second_token = sqlx::query!("SELECT subscription_token FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("重试后应当有且只有一个 token")
+        .subscription_token;
+    assert_ne!(first_token, second_token, "重试应当轮换 token，旧链接失效");
+
+    let token_count = sqlx::query!("SELECT count(*) AS count FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to count tokens.");
+    assert_eq!(
+        token_count.count,
+        Some(1),
+        "唯一索引应当保证一个订阅者只有一行 token"
+    );
+}
+
+/// 完整闭环：POST 订阅 → 303 → GET /subscriptions 看到 Flash 提示。
+///
+/// 这条测试是「Flash 消息真的有地方显示」的证明：
+/// 303 的目标页面必须存在，而且要把 {msg_html} 渲染出来，
+/// 否则消息发出去就丢了（改造前 303 指向一个不存在的端点，用户拿到 405）。
+#[tokio::test]
+async fn subscription_form_shows_a_flash_message_after_subscribing() {
+    let app = spawn_app().await;
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&app.email_server)
+        .await;
+
+    // 1) 提交表单
+    let response = app.post_subscriptions(body.into()).await;
+    assert_eq!(303, response.status().as_u16());
+    assert_eq!(
+        response.headers().get("LOCATION").unwrap(),
+        "/subscriptions"
+    );
+
+    // 2) 顺着 303 落到表单页：Flash 消息存在 cookie 里，由下一个请求读出来渲染
+    let html = app.get_subscriptions_html().await;
+    assert!(
+        html.contains("Check your inbox"),
+        "表单页应当渲染出 Flash 提示，实际内容: {}",
+        html
+    );
+    // 表单本身也得在，否则用户没法再次提交
+    assert!(
+        html.contains(r#"action="/subscriptions""#),
+        "表单页应当包含提交表单，实际内容: {}",
+        html
+    );
+
+    // 3) 再提交一次（此时状态是 pending，会重发确认邮件）仍然 303 + 有提示
+    let response = app.post_subscriptions(body.into()).await;
+    assert_eq!(303, response.status().as_u16());
+    let html = app.get_subscriptions_html().await;
+    assert!(
+        html.contains("Check your inbox"),
+        "重复提交后也应当渲染提示，实际内容: {}",
+        html
+    );
+}
+
+/// 已确认的订阅者再次提交：同样 303 回到表单页，并看到「已订阅」提示。
+#[tokio::test]
+async fn subscription_form_shows_an_already_subscribed_message() {
+    let app = spawn_app().await;
+    let email = "ursula_le_guin@gmail.com";
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    sqlx::query!(
+        "INSERT INTO subscriptions (id, email, name, subscribed_at, status)
+         VALUES ($1, $2, $3, now(), 'confirmed')",
+        uuid::Uuid::new_v4(),
+        email,
+        "le guin"
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to insert a confirmed subscriber.");
+
+    let response = app.post_subscriptions(body.into()).await;
+    assert_eq!(303, response.status().as_u16());
+
+    let html = app.get_subscriptions_html().await;
+    assert!(
+        html.contains("already subscribed"),
+        "已确认用户再次提交后应当看到提示，实际内容: {}",
+        html
+    );
 }

@@ -8,6 +8,7 @@ use actix_web::{web, HttpResponse};
 use actix_web_flash_messages::FlashMessage;
 use anyhow::Context;
 use sqlx::{PgPool, Postgres, Transaction};
+use crate::startup::ApplicationBaseUrl;
 
 #[derive(serde::Deserialize)]
 pub struct FormData {
@@ -19,7 +20,7 @@ pub struct FormData {
 
 #[tracing::instrument(
     name = "Publish a newsletter issue",
-    skip(form, pool, email_client, user_id),
+    skip(form, pool, email_client, user_id, base_url),
     fields(user_id=%*user_id)
 )]
 pub async fn publish_newsletter(
@@ -27,6 +28,7 @@ pub async fn publish_newsletter(
     user_id: web::ReqData<UserId>,
     pool: web::Data<PgPool>,
     email_client: web::Data<EmailClient>,
+    base_url: web::Data<ApplicationBaseUrl>
 ) -> Result<HttpResponse, actix_web::Error> {
     let user_id = user_id.into_inner();
     let FormData {title, text_content, html_content, idempotency_key} = form.0;
@@ -55,7 +57,7 @@ pub async fn publish_newsletter(
     // 尽力在本请求内把队列里的邮件发出去；
     // 发送失败的邮件会留在队列里，由后台 worker 重试。
     loop {
-        let outcome = try_execute_task(&pool, &email_client)
+        let outcome = try_execute_task(&pool, &email_client, &base_url.0)
             .await
             .map_err(e500)?;
         if let ExecutionOutcome::EmptyQueue = outcome {
@@ -102,8 +104,8 @@ async fn enqueue_delivery_tasks(
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
-        INSERT INTO issue_delivery_queue(newsletter_issue_id, subscriber_email)
-        SELECT $1, email
+        INSERT INTO email_delivery_queue(task_type, recipient, newsletter_issue_id)
+        SELECT 'newsletter', email, $1
         FROM subscriptions
         WHERE status = 'confirmed'
         "#,

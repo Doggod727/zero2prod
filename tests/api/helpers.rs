@@ -6,7 +6,7 @@ use sqlx::{Connection, Executor, PgConnection, PgPool};
 use uuid::Uuid;
 use wiremock::MockServer;
 use zero2prod::configurations::{get_configurations, DatabaseSettings};
-use zero2prod::startup::{get_connection_pool, Application};
+use zero2prod::startup::{Application};
 use zero2prod::telemetry::{get_subscriber, init_subscriber};
 
 // 使用once_cell确保tracing只能被初始化一次
@@ -84,6 +84,79 @@ pub struct TestApp {
     pub port: u16,
     pub(crate) test_user: TestUser,
     pub api_client: reqwest::Client,
+    /// 测试库名。Drop 时用它删除这个库。
+    db_name: String,
+    /// 不带库名的连接参数，用于连到维护库 postgres 执行 DROP DATABASE。
+    db_options: sqlx::postgres::PgConnectOptions,
+}
+
+/// 测试结束后自动删掉本次用例的数据库。
+///
+/// 为什么需要它：`spawn_app` 每个用例都 `CREATE DATABASE`，不清理的话跑一次测试
+/// 就泄漏几十个库。攒到上千个之后 Postgres 开始抖动，测试会以 `ConnectionReset` /
+/// `PoolTimedOut` 这种和被测逻辑无关的方式随机失败——那是最难排查的一类失败。
+///
+/// 这里踩过四个坑，都写在注释里了：
+///   1. `Drop` 是同步的、删库是异步的 → 需要桥接；
+///   2. `Handle::current()` 必须在**当前线程**取。`std::thread::spawn` 出来的线程
+///      不继承 tokio 运行时上下文，在新线程里调用它会 panic（no reactor running）；
+///   3. **不能在 Drop 里用测试自己的运行时 block_on**：`#[tokio::test]` 默认单线程，
+///      Drop 阻塞等待、而清理又要靠同一个运行时推进 → 互相等，死锁。
+///      所以删库用**独立的运行时**放在**独立线程**里跑；
+///   4. **必须 join 这个线程**。分离线程会在测试进程退出时被直接杀掉，
+///      表现就是"写了清理，库却一个没少"。
+///
+/// 另外**不要依赖 `pool.close()`**：application 的后台任务也握着这个池的连接，
+/// close 会一直等它们归还。这里改成从 Postgres 侧 `pg_terminate_backend` 踢掉残留会话。
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        let db_name = self.db_name.clone();
+        let options = self.db_options.clone();
+        let pool = self.db_pool.clone();
+
+        // A) 在测试自己的运行时上异步关掉池（不阻塞），尽量让连接先还回去
+        tokio::runtime::Handle::current().spawn(async move {
+            pool.close().await;
+        });
+
+        // B) 删库放在独立线程 + 独立运行时，并 join 等它完成
+        let db_name_for_thread = db_name.clone();
+        let handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build a runtime for test database cleanup");
+
+            runtime.block_on(async move {
+                let mut connection = PgConnection::connect_with(&options)
+                    .await
+                    .expect("Failed to connect to Postgres while dropping test database");
+
+                // 踢掉还挂在这个测试库上的会话（app 后台任务 + 上面的池）
+                connection
+                    .execute(
+                        format!(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
+                            db_name_for_thread
+                        )
+                        .as_str(),
+                    )
+                    .await
+                    .expect("Failed to terminate connections to test database");
+
+                // DROP DATABASE 必须自成一条语句（不能和上面的 SELECT 同批）
+                if let Err(e) = connection
+                    .execute(format!("DROP DATABASE IF EXISTS \"{}\"", db_name_for_thread).as_str())
+                    .await
+                {
+                    eprintln!("Failed to drop test database {db_name_for_thread}: {e}");
+                }
+            });
+        });
+
+        // 等清理线程收工（最多等 5 秒，避免个别情况挂住整个测试进程）
+        let _ = handle.join();
+    }
 }
 
 impl TestApp {
@@ -95,6 +168,19 @@ impl TestApp {
             .send()
             .await
             .expect("Failed to execute request.")
+    }
+
+    /// GET /subscriptions —— 渲染订阅表单（也是 POST 之后 303 的落点）
+    pub async fn get_subscriptions(&self) -> reqwest::Response {
+        self.api_client
+            .get(&format!("{}/subscriptions", &self.address))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub async fn get_subscriptions_html(&self) -> String {
+        self.get_subscriptions().await.text().await.unwrap()
     }
 
     /// 从发送给邮件API的邮件中提取出确认连接
@@ -227,7 +313,7 @@ pub async fn spawn_app() -> TestApp {
     };
 
     // 创建并迁移数据库
-    configure_database(&configuration.database).await;
+    let (db_pool, db_name) = configure_database(&configuration.database).await;
 
     let application = Application::build(configuration.clone())
         .await
@@ -243,18 +329,20 @@ pub async fn spawn_app() -> TestApp {
         .build()
         .unwrap();
     let test_app = TestApp {
-        // 如何得到呢？
         address: format!("http://localhost:{}", application_port),
-        db_pool: get_connection_pool(&configuration.database),
+        db_pool,
         email_server,
         port: application_port,
         test_user: TestUser::generate(),
-        api_client: client
+        api_client: client,
+        db_name,
+        // 不带库名，Drop 时连到维护库 postgres 上删库
+        db_options: configuration.database.without_db(),
     };
     test_app.test_user.store(&test_app.db_pool).await;
     test_app
 }
-async fn configure_database(config: &DatabaseSettings) -> PgPool {
+async fn configure_database(config: &DatabaseSettings) -> (PgPool, String) {
     // 创建数据库
     let mut connection = PgConnection::connect_with(&config.without_db())
         .await
@@ -271,7 +359,7 @@ async fn configure_database(config: &DatabaseSettings) -> PgPool {
         .run(&connection_pool)
         .await
         .expect("Failed to migrate the database");
-    connection_pool
+    (connection_pool, config.database_name.clone())
 }
 
 pub fn assert_is_redirect_to(response: &reqwest::Response, location: &str) {
