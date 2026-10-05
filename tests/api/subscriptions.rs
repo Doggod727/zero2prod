@@ -406,3 +406,78 @@ async fn subscription_form_shows_an_already_subscribed_message() {
         html
     );
 }
+
+/// 反复提交订阅表单不会堆积多条确认任务。
+///
+/// 这条测试针对的是一个很容易忽略的坑：**已有的
+/// `UNIQUE (newsletter_issue_id, recipient)` 对确认任务完全不起作用** ——
+/// 确认任务的 newsletter_issue_id 是 NULL，而 SQL 里 NULL 互不相等，
+/// 所以 (NULL, 'a@b.com') 和 (NULL, 'a@b.com') 不算冲突。
+///
+/// 真正的保证来自那条**部分唯一索引**：
+///     UNIQUE (recipient) WHERE task_type = 'confirmation'
+///
+/// 这里让第一次发信失败，好让任务【留在队列里】，否则它会被成功发出去然后删掉，
+/// 就观察不到"重复入队"这件事了。
+#[tokio::test]
+async fn repeated_submissions_do_not_accumulate_confirmation_tasks() {
+    let app = spawn_app().await;
+    let email = "ursula_le_guin@gmail.com";
+    let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
+
+    // 发信一律失败 → 确认任务会带着退避留在队列里
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&app.email_server)
+        .await;
+
+    // 提交三次
+    for _ in 0..3 {
+        let response = app.post_subscriptions(body.into()).await;
+        assert_eq!(303, response.status().as_u16(), "重复订阅仍然应当 303");
+    }
+
+    // 队列里只能有一条确认任务 —— 这就是部分唯一索引在起作用
+    let queued = sqlx::query!(
+        "SELECT count(*) AS count FROM email_delivery_queue
+         WHERE task_type = 'confirmation' AND recipient = $1",
+        email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to count queued confirmation tasks.");
+    assert_eq!(
+        queued.count,
+        Some(1),
+        "同一个订阅者不应当堆积多条确认任务（部分唯一索引没生效？）"
+    );
+
+    // 确认 token 也必须只有一行 —— 每次提交都会轮换，但只有一个订阅者
+    let tokens = sqlx::query!("SELECT count(*) AS count FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to count tokens.");
+    assert_eq!(tokens.count, Some(1), "轮换 token 不应该留下多行");
+
+    // 而且队列里那条任务带的是【最新】的 token（否则用户点开会是失效链接）
+    let queued_token = sqlx::query!(
+        "SELECT subscription_token FROM email_delivery_queue
+         WHERE task_type = 'confirmation' AND recipient = $1",
+        email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .expect("Failed to fetch the queued token.")
+    .subscription_token;
+    let stored_token = sqlx::query!("SELECT subscription_token FROM subscription_tokens")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to fetch the stored token.")
+        .subscription_token;
+    assert_eq!(
+        queued_token.as_deref(),
+        Some(stored_token.as_str()),
+        "队列里的任务必须带最新的 token，否则用户点开的是失效链接"
+    );
+}
