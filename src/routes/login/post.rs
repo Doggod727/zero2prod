@@ -10,6 +10,7 @@ use secrecy::{Secret};
 use sqlx::PgPool;
 use std::fmt::Formatter;
 use actix_web_flash_messages::FlashMessage;
+use crate::rate_limiting::{LoginRateLimiter, WINDOW_SECONDS};
 use crate::session_state::TypedSession;
 #[derive(serde::Deserialize)]
 pub struct FormData {
@@ -30,14 +31,29 @@ impl std::fmt::Debug for LoginError {
     }
 }
 #[tracing::instrument(
-    skip(form, pool, session),
+    skip(form, pool, session, rate_limiter),
     fields(uesrname=tracing::field::Empty, user_id=tracing::field::Empty)
 )]
 pub async fn login(
     form: web::Form<FormData>,
     pool: web::Data<PgPool>,
     session: TypedSession,
+    rate_limiter: web::Data<LoginRateLimiter>
 ) -> Result<HttpResponse, InternalError<LoginError>> {
+    // 1）先限流
+    match rate_limiter.try_acquire(&form.username).await {
+        Ok(true) => {/*放行，继续检验密码*/},
+        Ok(false) => {
+            // 访问超限
+            return Ok(HttpResponse::TooManyRequests()
+                .insert_header(("Retry-After", WINDOW_SECONDS.to_string()))
+                .finish());
+        }
+        Err(e) => {
+            // fail-open: 可用性优先，继续去校验密码，但是要有日志
+            tracing::error!(error.cause_chain = ?e, error.message = %e, "Rate limiter unavailable, allowing the request (fail-open)");
+        }
+    }
     let credentials = Credentials {
         username: form.0.username,
         password: form.0.password,

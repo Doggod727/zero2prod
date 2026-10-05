@@ -243,6 +243,44 @@
     },
     "query": "\n        DELETE FROM email_delivery_queue\n        WHERE delivery_id = $1\n        "
   },
+  "6b533827c0fc9ad600668ed8d89f18d249e7903059c9f90591b991a31b27b990": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "email",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "name",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "subscribed_at",
+          "ordinal": 3,
+          "type_info": "Timestamptz"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Int8"
+        ]
+      }
+    },
+    "query": "\n        SELECT id, email, name, subscribed_at\n        FROM subscriptions\n        WHERE status = 'confirmed'\n        ORDER BY subscribed_at DESC, id DESC\n        LIMIT $1\n        "
+  },
   "78f3c81379eed5632047f71c367208667c2aa153746424c6d9fbf1ce343e5c89": {
     "describe": {
       "columns": [
@@ -347,6 +385,46 @@
       }
     },
     "query": "\n        SELECT user_id, password_hash\n        FROM users\n        WHERE username = $1\n        "
+  },
+  "b59c9862c26bc844adebf94f80830aa054fcb8e35b60ac2d5a42f6cc903b2289": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "email",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "name",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "subscribed_at",
+          "ordinal": 3,
+          "type_info": "Timestamptz"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Timestamptz",
+          "Uuid",
+          "Int8"
+        ]
+      }
+    },
+    "query": "\n        SELECT id, email, name, subscribed_at\n        FROM subscriptions\n        WHERE status = 'confirmed'\n            AND (subscribed_at, id) < ($1, $2)\n        ORDER BY subscribed_at DESC, id DESC\n        LIMIT $3\n        "
   },
   "c5b7d1e933b18e817f9b9a580196c09c4bb486fdf0e63b460f6b925a63d578ba": {
     "describe": {

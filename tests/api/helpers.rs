@@ -183,6 +183,21 @@ impl TestApp {
         self.get_subscriptions().await.text().await.unwrap()
     }
 
+    /// 限流窗口是 60 秒，等它自然过期会让测试很慢；
+    /// 这里直接把限流键删掉，模拟"窗口已过、计数归零"。
+    ///
+    /// 注意：这只验证了"计数归零后放行"，并没有验证 TTL 真的到点会自动消失
+    /// —— 那条性质依赖 Redis 的 EXPIRE，我们在 Lua 脚本里设置了它。
+    pub async fn reset_login_rate_limit(&self, username: &str) -> Result<(), redis::RedisError> {
+        let client = redis::Client::open("redis://127.0.0.1:6379")?;
+        let mut conn = client.get_tokio_connection().await?;
+        redis::cmd("DEL")
+            .arg(format!("login:rate_limit:{username}"))
+            .query_async::<_, ()>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     /// GET /admin/subscribers —— 订阅者列表（可带游标）
     pub async fn get_subscribers_page(&self, query: &str) -> reqwest::Response {
         self.api_client

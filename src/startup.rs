@@ -19,6 +19,9 @@ use secrecy::ExposeSecret;
 use actix_web::cookie::Key;
 use actix_session::SessionMiddleware;
 use actix_session::storage::RedisSessionStore;
+use redis::aio::ConnectionManager;
+use crate::rate_limiting::LoginRateLimiter;
+
 #[derive(Clone)]
 pub struct HmacSecret(pub Secret<String>);
 // 一个新的类型，用来保存新构建的服务器及其端口
@@ -90,6 +93,9 @@ pub async fn run(
     let email_client = web::Data::new(email_client);
     let base_url = web::Data::new(ApplicationBaseUrl(base_url));
     let redis_store = RedisSessionStore::new(redis_uri.expose_secret()).await?;
+    let redis_client = redis::Client::open(redis_uri.expose_secret().to_owned())?;
+    let connection_manager = ConnectionManager::new(redis_client).await?;
+    let rate_limiter = web::Data::new(LoginRateLimiter::new(connection_manager));
     let server = HttpServer::new(move || {
         App::new()
             // 将中间件通过'wrap'方法加入到'App'中
@@ -122,6 +128,7 @@ pub async fn run(
             .app_data(email_client.clone())
             .app_data(base_url.clone())
             .app_data(web::Data::new(HmacSecret(hmac_secret.clone())))
+            .app_data(rate_limiter.clone())
     })
     .listen(listener)?
     .run();
