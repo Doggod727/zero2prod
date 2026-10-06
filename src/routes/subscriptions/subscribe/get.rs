@@ -18,7 +18,8 @@ pub async fn subscription_form(
 
     Ok(HttpResponse::Ok()
         .content_type(ContentType::html())
-        .body(format!(r#"<!DOCTYPE html>
+        .body(format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta http-equiv="content-type" content="text/html; charset=utf-8">
@@ -46,5 +47,6 @@ pub async fn subscription_form(
         <button type="submit">Subscribe</button>
     </form>
 </body>
-</html>"#)))
+</html>"#
+        )))
 }

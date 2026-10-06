@@ -1,17 +1,21 @@
 //! src/routes/admin/dashboard.rs
-use actix_web::{web, HttpResponse};
 use crate::authentication::UserId;
-use uuid::Uuid;
-use sqlx::PgPool;
-use actix_web::http::header::ContentType;
-use anyhow::Context;
 use crate::utils::e500;
-pub async fn admin_dashboard(user_id: web::ReqData<UserId>, pool: web::Data<PgPool>) -> Result<HttpResponse, actix_web::Error> {
+use actix_web::http::header::ContentType;
+use actix_web::{web, HttpResponse};
+use anyhow::Context;
+use sqlx::PgPool;
+use uuid::Uuid;
+pub async fn admin_dashboard(
+    user_id: web::ReqData<UserId>,
+    pool: web::Data<PgPool>,
+) -> Result<HttpResponse, actix_web::Error> {
     let user_id = user_id.into_inner();
     let username = get_username(*user_id, &pool).await.map_err(e500)?;
-    Ok(HttpResponse::Ok().
-        content_type(ContentType::html())
-        .body(format!(r#"<!DOCTYPE html>
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::html())
+        .body(format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta http-equiv="content-type" content="text/html; charset=utf-8">
@@ -31,7 +35,8 @@ pub async fn admin_dashboard(user_id: web::ReqData<UserId>, pool: web::Data<PgPo
         </li>
     </ol>
 </body>
-</html>"#)))
+</html>"#
+        )))
 }
 
 #[tracing::instrument(name = "Get username", skip(pool))]
@@ -44,8 +49,8 @@ pub async fn get_username(user_id: Uuid, pool: &PgPool) -> Result<String, anyhow
         "#,
         user_id
     )
-        .fetch_optional(pool)
-        .await
-        .context("Failed to perform a query to retrieve a username")?;
+    .fetch_optional(pool)
+    .await
+    .context("Failed to perform a query to retrieve a username")?;
     Ok(row.unwrap().username)
 }

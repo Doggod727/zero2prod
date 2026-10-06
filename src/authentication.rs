@@ -8,8 +8,8 @@ use actix_web::error::InternalError;
 use actix_web::middleware::Next;
 use actix_web::{FromRequest, HttpMessage};
 use anyhow::Context;
-use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use argon2::password_hash::SaltString;
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use secrecy::{ExposeSecret, Secret};
 use sqlx::PgPool;
 use std::ops::Deref;
@@ -37,7 +37,7 @@ pub async fn validate_credentials(
         "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG".to_string(),
     );
     if let Some((stored_user_id, stored_password_hash)) =
-        get_stored_credentials(&credentials.username, &pool).await?
+        get_stored_credentials(&credentials.username, pool).await?
     {
         user_id = Some(stored_user_id);
         expected_password_hash = stored_password_hash;
@@ -91,15 +91,14 @@ pub async fn verify_password_hash(
         .map_err(AuthError::InvalidCredentials)
 }
 
-#[tracing::instrument(
-    name ="Change password",
-    skip(password, pool)
-)]
-pub async fn change_password(user_id: uuid::Uuid, password: Secret<String>, pool: &PgPool) 
-    -> Result<(), anyhow::Error> {
-    let password_hash = spawn_blocking_with_tracing(move || {
-        compute_password_hash(password)
-    }).await?
+#[tracing::instrument(name = "Change password", skip(password, pool))]
+pub async fn change_password(
+    user_id: uuid::Uuid,
+    password: Secret<String>,
+    pool: &PgPool,
+) -> Result<(), anyhow::Error> {
+    let password_hash = spawn_blocking_with_tracing(move || compute_password_hash(password))
+        .await?
         .context("Failed to hash password")?;
     sqlx::query!(
         r#"
@@ -109,10 +108,10 @@ pub async fn change_password(user_id: uuid::Uuid, password: Secret<String>, pool
         "#,
         password_hash.expose_secret(),
         user_id
-        )
-        .execute(pool)
-        .await
-        .context("Failed to change user's password in the database.")?;
+    )
+    .execute(pool)
+    .await
+    .context("Failed to change user's password in the database.")?;
     Ok(())
 }
 
@@ -123,8 +122,8 @@ fn compute_password_hash(password: Secret<String>) -> Result<Secret<String>, any
         Version::V0x13,
         Params::new(15000, 2, 1, None)?,
     )
-        .hash_password(password.expose_secret().as_bytes(), &salt)?
-        .to_string();
+    .hash_password(password.expose_secret().as_bytes(), &salt)?
+    .to_string();
     Ok(Secret::new(password_hash))
 }
 

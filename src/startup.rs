@@ -2,25 +2,29 @@
 use crate::authentication::reject_anonymous_users;
 use crate::configurations::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe, subscribers_list};
-use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
+use crate::rate_limiting::LoginRateLimiter;
 use crate::routes::subscription_form;
+use crate::routes::{
+    admin_dashboard, change_password, change_password_form, newsletter_form, subscribe,
+    subscribers_list,
+};
+use crate::routes::{confirm, health_check, home, log_out, login, login_form, publish_newsletter};
+use crate::routes::{unsubscribe, unsubscribe_form};
+use actix_session::storage::RedisSessionStore;
+use actix_session::SessionMiddleware;
+use actix_web::cookie::Key;
 use actix_web::dev::{Server, ServerHandle};
 use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer};
+use actix_web_flash_messages::storage::CookieMessageStore;
+use actix_web_flash_messages::FlashMessagesFramework;
+use redis::aio::ConnectionManager;
+use secrecy::ExposeSecret;
 use secrecy::Secret;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::net::TcpListener;
 use tracing_actix_web::TracingLogger;
-use actix_web_flash_messages::FlashMessagesFramework;
-use actix_web_flash_messages::storage::CookieMessageStore;
-use secrecy::ExposeSecret;
-use actix_web::cookie::Key;
-use actix_session::SessionMiddleware;
-use actix_session::storage::RedisSessionStore;
-use redis::aio::ConnectionManager;
-use crate::rate_limiting::LoginRateLimiter;
 
 #[derive(Clone)]
 pub struct HmacSecret(pub Secret<String>);
@@ -28,7 +32,7 @@ pub struct HmacSecret(pub Secret<String>);
 pub struct Application {
     port: u16,
     server: Server,
-    terminate_handle: Option<ServerHandle>
+    terminate_handle: Option<ServerHandle>,
 }
 
 impl Application {
@@ -61,11 +65,16 @@ impl Application {
             email_client,
             configuration.application.base_url,
             configuration.application.hmac_secret,
-            configuration.redis_uri
-        ).await?;
+            configuration.redis_uri,
+        )
+        .await?;
         let terminate_handle = Some(server.handle());
         // 将绑定值保存在Application结构体中
-        Ok(Self { port, server , terminate_handle})
+        Ok(Self {
+            port,
+            server,
+            terminate_handle,
+        })
     }
 
     pub fn port(&self) -> u16 {
@@ -88,7 +97,7 @@ pub async fn run(
     email_client: EmailClient,
     base_url: String,
     hmac_secret: Secret<String>,
-    redis_uri: Secret<String>
+    redis_uri: Secret<String>,
 ) -> Result<Server, anyhow::Error> {
     let secret_key = Key::from(hmac_secret.expose_secret().as_bytes());
     let message_store = CookieMessageStore::builder(secret_key.clone()).build();
@@ -106,13 +115,23 @@ pub async fn run(
             // 替代Logger::default()
             .wrap(TracingLogger::default())
             .wrap(message_framework.clone())
-            .wrap(SessionMiddleware::new(redis_store.clone(), secret_key.clone()))
+            .wrap(SessionMiddleware::new(
+                redis_store.clone(),
+                secret_key.clone(),
+            ))
             .route("/health_check", web::get().to(health_check)) // web::get().to(health_check) => Route::new().guard(guard::Get()).to(health_check)
             // GET 渲染表单；POST 处理提交。POST 结束后 303 回来这里，
             // 用户才能看到 Flash 消息（PRG 模式，F5 不会重复提交）。
             .route("/subscriptions", web::get().to(subscription_form))
             .route("/subscriptions", web::post().to(subscribe))
             .route("/subscriptions/confirm", web::get().to(confirm))
+            // 退订：GET 只渲染确认页（邮件客户端会预取链接，GET 里绝不能改状态）；
+            // POST 才执行 —— RFC 8058 的一键退订也是 POST，而且只带 query 参数。
+            .route(
+                "/subscriptions/unsubscribe",
+                web::get().to(unsubscribe_form),
+            )
+            .route("/subscriptions/unsubscribe", web::post().to(unsubscribe))
             .route("/", web::get().to(home))
             .route("/login", web::post().to(login))
             .route("/login", web::get().to(login_form))
@@ -125,7 +144,7 @@ pub async fn run(
                     .route("/password", web::get().to(change_password_form))
                     .route("/password", web::post().to(change_password))
                     .route("/logout", web::post().to(log_out))
-                    .route("/subscribers", web::get().to(subscribers_list))
+                    .route("/subscribers", web::get().to(subscribers_list)),
             )
             // 将链接注册为应用程序状态的一部分
             .app_data(dp_pool.clone())

@@ -12,6 +12,7 @@
 pub enum SubscriberStatus {
     PendingConfirmation,
     Confirmed,
+    Unsubscribed,
 }
 
 impl SubscriberStatus {
@@ -20,12 +21,26 @@ impl SubscriberStatus {
         match self {
             SubscriberStatus::PendingConfirmation => "pending_confirmation",
             SubscriberStatus::Confirmed => "confirmed",
+            SubscriberStatus::Unsubscribed => "unsubscribed",
         }
     }
 
     /// 待确认的用户才需要（重新）发送确认邮件；已确认的用户不应该被降级。
     pub fn needs_confirmation_email(&self) -> bool {
         matches!(self, SubscriberStatus::PendingConfirmation)
+    }
+
+    /// 还在收信的人。
+    ///
+    /// 为什么要有这个方法，而不是在各处写 `status == "confirmed"`：
+    ///   "还在收信" 是一个【领域概念】，不是字符串比较。
+    ///   以后加 Bounced（硬退信）时，"活跃"的定义会变，而变化的点只有这一处；
+    ///   散落成字符串比较的话，每加一个状态都要全项目 grep `= 'confirmed'`。
+    ///
+    /// 注意：SQL 里仍然写 `status = 'confirmed'`（数据库不认 Rust 枚举），
+    /// 这个方法管的是 Rust 侧的判断，两者靠 as_str() 保持同一个字面量。
+    pub fn is_active(&self) -> bool {
+        matches!(self, SubscriberStatus::Confirmed)
     }
 }
 
@@ -37,6 +52,7 @@ impl TryFrom<String> for SubscriberStatus {
         match value.as_str() {
             "pending_confirmation" => Ok(SubscriberStatus::PendingConfirmation),
             "confirmed" => Ok(SubscriberStatus::Confirmed),
+            "unsubscribed" => Ok(SubscriberStatus::Unsubscribed),
             other => Err(UnknownSubscriberStatus(other.to_owned())),
         }
     }

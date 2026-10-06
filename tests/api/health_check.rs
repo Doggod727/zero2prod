@@ -13,7 +13,7 @@ async fn health_check_works() {
 
     // 执行
     let response = client
-        .get(&format!("{}/health_check", test_app.address))
+        .get(format!("{}/health_check", test_app.address))
         .send()
         .await
         .expect("Failed to execute request.");

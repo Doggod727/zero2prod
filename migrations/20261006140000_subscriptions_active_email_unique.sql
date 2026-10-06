@@ -1,0 +1,57 @@
+-- 把「邮箱唯一」改成「活跃订阅唯一」。
+--
+-- ============================================================
+-- 为什么要改
+-- ============================================================
+--
+-- 原来的约束是 subscriptions_email_key = UNIQUE(email)，它的字面含义是
+--   「一个邮箱在【历史所有时间】只能存在一行」。
+--
+-- 但退订功能让这个含义变错了。业务上真正的不变量是：
+--   「一个邮箱在【同一时刻】最多有一个活跃订阅」。
+--
+-- 差别在退订之后立刻显现：
+--   · 一个退订过的人重新订阅 → 复用同一行，没问题；
+--   · 但只要出现任何一种「保留退订记录」的需求，UNIQUE(email) 就挡路：
+--       - 归档：把长期不活跃的退订用户挪到 archived_subscriptions 表
+--               → 归档表里留着 old@x.com，他再也订阅不了；
+--       - 硬退信（bounce）风控：退订/退信记录要留着做发信信誉分析
+--               → 同上；
+--       - 审计：保留"这个邮箱何时退订过"的历史
+--               → 同上。
+--   这三种需求在真实邮件系统里都是标配，而它们全都要「同一邮箱多行」。
+--
+-- 换成分组部分唯一索引之后，语义变成：
+--   同一邮箱可以有【任意多行 'unsubscribed'】，但最多一行是活跃的。
+-- 这正是业务不变量，而且它由数据库强制，不靠应用层自觉。
+--
+-- ============================================================
+-- 代价（要如实写下来）
+-- ============================================================
+--
+-- 1. 两条索引不能同时存在（一个邮箱只能有一行活跃的，这条被两条索引都管着，
+--    但 UNIQUE(email) 额外禁止了"多行 unsubscribed"，与目标冲突），
+--    所以必须先删。删掉之后到 CREATE 之间有一个极短的无保护窗口 ——
+--    迁移在事务里跑，所以对别的会话不可见，但迁移自身失败会留下无索引状态。
+--
+--    ⚠️ 必须是 DROP CONSTRAINT，不能是 DROP INDEX。
+--       subscriptions_email_key 是建表时用 `UNIQUE (email)` 写的【表约束】，
+--       Postgres 为它自动建了一个同名索引，而这个索引归约束所有，
+--       直接 DROP INDEX 会报：
+--           cannot drop index subscriptions_email_key because
+--           constraint subscriptions_email_key on table subscriptions requires it
+--       对比：另一个索引 subscriptions_active_email_unique 是 CREATE UNIQUE INDEX
+--       建的【独立索引】，那个要用 DROP INDEX。
+--       两类东西长得一样，能不能直接删取决于它是不是约束的附属物。
+-- 2. 应用侧的 ON CONFLICT 目标必须跟着改。部分唯一索引做冲突目标时，
+--    ON CONFLICT 必须带上【同样的 WHERE 谓词】才认得出来，
+--    否则 Postgres 会报「no unique or exclusion constraint matching the ON CONFLICT
+--    specification」—— 这个报错不会提示你"谓词写漏了"，只会说找不到约束。
+--    见 subscribe/persistence.rs 里的 insert_subscriber。
+-- 先确认这个约束真的叫这个名字（本项目的迁移历史里改过表结构，
+-- 名字不是"显然"的，值得先查一次：\d subscriptions）
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_email_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_active_email_unique
+    ON subscriptions (email)
+    WHERE status <> 'unsubscribed';

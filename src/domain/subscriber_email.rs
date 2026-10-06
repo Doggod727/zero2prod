@@ -21,6 +21,12 @@ impl AsRef<str> for SubscriberEmail {
     }
 }
 
+impl std::fmt::Display for SubscriberEmail {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SubscriberEmail;
@@ -68,11 +74,5 @@ mod tests {
     #[quickcheck_macros::quickcheck]
     fn valid_emails_are_parsed_successfully(valid_email_fixture: ValidEmailFixture) -> bool {
         SubscriberEmail::parse(valid_email_fixture.0).is_ok()
-    }
-}
-
-impl std::fmt::Display for SubscriberEmail {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
     }
 }

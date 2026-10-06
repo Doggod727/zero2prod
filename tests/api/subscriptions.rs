@@ -269,13 +269,10 @@ async fn subscribe_can_recover_from_a_failed_confirmation_email() {
     );
 
     // 订阅者已经落库，并且拿到了一个 token
-    let after_first = sqlx::query!(
-        "SELECT status FROM subscriptions WHERE email = $1",
-        email
-    )
-    .fetch_one(&app.db_pool)
-    .await
-    .expect("订阅者应当已经落库，否则用户重试还是会撞唯一约束");
+    let after_first = sqlx::query!("SELECT status FROM subscriptions WHERE email = $1", email)
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("订阅者应当已经落库，否则用户重试还是会撞唯一约束");
     assert_eq!(after_first.status, "pending_confirmation");
 
     let first_token = sqlx::query!("SELECT subscription_token FROM subscription_tokens")

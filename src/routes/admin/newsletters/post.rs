@@ -3,19 +3,19 @@ use crate::authentication::UserId;
 use crate::email_client::EmailClient;
 use crate::idempotency::{save_response, try_processing, IdempotencyKey, NextAction};
 use crate::issue_delivery_worker::{try_execute_task, ExecutionOutcome};
+use crate::startup::ApplicationBaseUrl;
 use crate::utils::{e400, e500, see_other};
 use actix_web::{web, HttpResponse};
 use actix_web_flash_messages::FlashMessage;
 use anyhow::Context;
 use sqlx::{PgPool, Postgres, Transaction};
-use crate::startup::ApplicationBaseUrl;
 
 #[derive(serde::Deserialize)]
 pub struct FormData {
     title: String,
     text_content: String,
     html_content: String,
-    idempotency_key: String
+    idempotency_key: String,
 }
 
 #[tracing::instrument(
@@ -28,10 +28,15 @@ pub async fn publish_newsletter(
     user_id: web::ReqData<UserId>,
     pool: web::Data<PgPool>,
     email_client: web::Data<EmailClient>,
-    base_url: web::Data<ApplicationBaseUrl>
+    base_url: web::Data<ApplicationBaseUrl>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let user_id = user_id.into_inner();
-    let FormData {title, text_content, html_content, idempotency_key} = form.0;
+    let FormData {
+        title,
+        text_content,
+        html_content,
+        idempotency_key,
+    } = form.0;
     let idempotency_key: IdempotencyKey = idempotency_key.try_into().map_err(e400)?;
     let response = match try_processing(&pool, &idempotency_key, *user_id)
         .await
@@ -77,7 +82,7 @@ async fn insert_newsletter_issue(
     transaction: &mut Transaction<'_, Postgres>,
     title: &str,
     text_content: &str,
-    html_content: &str
+    html_content: &str,
 ) -> Result<uuid::Uuid, sqlx::Error> {
     let newsletter_issue_id = uuid::Uuid::new_v4();
     sqlx::query!(
@@ -92,22 +97,33 @@ async fn insert_newsletter_issue(
         text_content,
         html_content,
     )
-        .execute(transaction)
-        .await?;
+    .execute(transaction)
+    .await?;
     Ok(newsletter_issue_id)
 }
 
 #[tracing::instrument(skip_all)]
 async fn enqueue_delivery_tasks(
     transaction: &mut Transaction<'_, Postgres>,
-    newsletter_issue_id: uuid::Uuid
+    newsletter_issue_id: uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
+    // 顺便把每个收件人的退订 token 写进 subscription_token 这一列。
+    //
+    // 为什么复用这一列而不是新加一列：这一列的语义已经变成
+    // "发这封信时需要的那个凭据"——确认任务放确认 token，
+    // newsletter 任务放退订 token。新加一列会立刻带来
+    // "谁填、谁不填、payload 约束怎么写"三个问题，而这一列本来就 NOT NULL。
+    //
+    // ⚠️ INNER JOIN 意味着"没有退订 token 的订阅者收不到这封 newsletter"。
+    //    靠迁移 20261006120000 的 backfill + subscribe 时建 token 来保证不漏人。
+    //    迁移末尾那个 DO 块会在有遗漏时把迁移打回 —— 就是为了不让它静默丢人。
     sqlx::query!(
         r#"
-        INSERT INTO email_delivery_queue(task_type, recipient, newsletter_issue_id)
-        SELECT 'newsletter', email, $1
-        FROM subscriptions
-        WHERE status = 'confirmed'
+        INSERT INTO email_delivery_queue(task_type, recipient, newsletter_issue_id, subscription_token)
+        SELECT 'newsletter', s.email, $1, t.unsubscription_token
+        FROM subscriptions s
+        JOIN unsubscription_tokens t ON t.subscriber_id = s.id
+        WHERE s.status = 'confirmed'
         "#,
         newsletter_issue_id
     )

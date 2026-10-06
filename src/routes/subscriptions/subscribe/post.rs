@@ -1,10 +1,12 @@
 //! src/routes/subscriptions/post.rs
-use super::persistence::{
-    error_chain_fmt, generate_subscription_token, insert_subscriber, store_token, StoreTokenError,
-};
+use super::persistence::{insert_subscriber, store_token, StoreTokenError};
 use crate::domain::{NewSubscriber, SubscriberEmail, SubscriberName, SubscriberStatus};
 use crate::email_client::EmailClient;
+use crate::issue_delivery_worker::{try_execute_task, ExecutionOutcome};
+use crate::routes::subscriptions::unsubscribe::store_unsubscription_token;
 use crate::startup::ApplicationBaseUrl;
+use crate::utils::error_chain_fmt;
+use crate::utils::generate_token;
 use crate::utils::see_other;
 use actix_web::http::StatusCode;
 use actix_web::{web, HttpResponse, ResponseError};
@@ -12,7 +14,6 @@ use actix_web_flash_messages::FlashMessage;
 use anyhow::Context;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt::Formatter;
-use crate::issue_delivery_worker::{try_execute_task, ExecutionOutcome};
 
 /// POST /subscriptions 的表单字段。
 #[derive(serde::Deserialize)]
@@ -72,12 +73,36 @@ pub async fn subscribe(
             FlashMessage::info("This email is already subscribed.").send();
             Ok(see_other("/subscriptions"))
         }
-        // 新订阅者，或之前发信失败、现在重试：轮换 token 并重发确认邮件。
-        SubscriberStatus::PendingConfirmation => {
-            let subscriber_token = generate_subscription_token();
+        // 新订阅者 / 之前发信失败现在重试 / 退订过又想回来：都走这条。
+        //
+        // 为什么 Unsubscribed 要并进这一支、而不是并进上面 Confirmed 那支：
+        //   并进 Confirmed 的话，一个退订过的人【永远回不来】—— 他主动提交订阅表单，
+        //   得到的是 "This email is already subscribed"（而且这句话是错的，他并没有订阅），
+        //   同时因为 status 不是 confirmed，他也不会再收到任何邮件。
+        //   退订是可逆的，重新订阅必须能把他激活回 pending_confirmation。
+        SubscriberStatus::PendingConfirmation | SubscriberStatus::Unsubscribed => {
+            let subscriber_token = generate_token();
             store_token(&mut transaction, record.id, &subscriber_token)
                 .await
                 .context("Failed to store the confirmation token for a new subscriber.")?;
+
+            // 退订 token 在【订阅时】就建好，不是等到退订时才建。
+            //
+            // 原因：下面这封确认邮件从第一封起就带 List-Unsubscribe 头，
+            // 而那个链接本身需要一个 token。等退订时才创建的话，
+            // 第一封邮件里的退订链接必然是死的 —— 用户点了看到"链接无效"，
+            // 而 Gmail 预取这个链接时会因为拿不到有效页而干脆不显示退订按钮。
+            //
+            // ⚠️ 必须用返回值。store_unsubscription_token 在冲突时【不轮换】，
+            //    库里留的是更早那个 token；用自己生成的那个拼链接，
+            //    用户点下去同样是"链接无效"。
+            // 这里【不需要】把返回值留着：确认邮件由 worker 发，worker 会按收件人
+            // 现查退订 token（见 issue_delivery_worker::get_unsubscription_token）。
+            // 之所以仍然用返回值而不是忽略它，见 store_unsubscription_token 的注释。
+            let _unsubscription_token =
+                store_unsubscription_token(&mut transaction, record.id, generate_token())
+                    .await
+                    .context("Failed to store the unsubscription token for a new subscriber.")?;
 
             // 用户可能反复提交订阅表单，每次都会轮换 token。如果没有约束，
             // 同一个订阅者会被塞进多条确认任务，于是收到好几封确认邮件。
@@ -93,7 +118,8 @@ pub async fn subscribe(
             //
             // 冲突时刷新 token 与重试状态：用户重新提交 = 想立刻再收到一封，
             // 所以把 attempts 归零、next_retry_at 拉回现在。
-            enqueue_confirmation_tasks(&mut transaction, &subscriber_token, new_subscriber.email).await
+            enqueue_confirmation_tasks(&mut transaction, &subscriber_token, new_subscriber.email)
+                .await
                 .context("Failed to insert a task")?;
             transaction
                 .commit()
@@ -110,6 +136,9 @@ pub async fn subscribe(
             //      循环会继续直到队列空，它一定会被处理。
             //
             // 和 publish_newsletter 里的做法保持一致。
+            // 注意：这里【不】直接调 send_confirmation_email ——
+            // 发信统一走队列 + try_execute_task，否则"发信 + 失败退避"就有两条代码路径，
+            // 以后改退避策略必然漏掉一处。
             loop {
                 let outcome = try_execute_task(&pool, &email_client, &base_url.0)
                     .await
@@ -128,34 +157,6 @@ pub async fn subscribe(
             Ok(see_other("/subscriptions"))
         }
     }
-}
-
-#[tracing::instrument(
-    name = "Send a confirmation email to a new subscriber"
-    skip(email_client, new_subscriber, base_url)
-)]
-pub async fn send_confirmation_email(
-    email_client: &EmailClient,
-    new_subscriber: NewSubscriber,
-    base_url: &str,
-    subscription_token: &str,
-) -> Result<(), reqwest::Error> {
-    let confirmation_link = format!(
-        "{}/subscriptions/confirm?subscription_token={}",
-        base_url, subscription_token
-    );
-    let plain_body = format!(
-        "Welcome to our newsletter!\nVisit {} to confirm your subscription",
-        confirmation_link
-    );
-    let html_body = format!(
-        "Welcome to our newsletter!<br />\
-            Click <a href=\"{}\">here</a> to confirm your subscription.",
-        confirmation_link
-    );
-    email_client
-        .send_email(&new_subscriber.email, "Welcome!", &html_body, &plain_body)
-        .await
 }
 
 #[derive(thiserror::Error)]
@@ -188,11 +189,10 @@ impl From<StoreTokenError> for SubscriberError {
     }
 }
 
-
 async fn enqueue_confirmation_tasks(
     transaction: &mut Transaction<'_, Postgres>,
     subscription_token: &str,
-    recipient: SubscriberEmail
+    recipient: SubscriberEmail,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
@@ -207,7 +207,7 @@ async fn enqueue_confirmation_tasks(
         recipient.as_ref(),
         subscription_token
     )
-        .execute(transaction)
-        .await?;
+    .execute(transaction)
+    .await?;
     Ok(())
 }

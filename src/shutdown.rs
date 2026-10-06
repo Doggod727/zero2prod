@@ -3,8 +3,8 @@
 pub async fn terminate_signal() {
     use tokio::signal::unix::{signal, SignalKind};
 
-    let mut sigterm = signal(SignalKind::terminate())
-        .expect("Failed to register the SIGTERM handler");
+    let mut sigterm =
+        signal(SignalKind::terminate()).expect("Failed to register the SIGTERM handler");
 
     tokio::select! {
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, starting graceful shutdown"),

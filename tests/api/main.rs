@@ -3,10 +3,11 @@ mod health_check;
 mod helpers;
 mod subscriptions;
 
+mod admin_dashboard;
+mod change_password;
 mod login;
 mod newsletter;
-mod subscriptions_confirm;
-mod admin_dashboard;
 mod subscribers;
-mod change_password;
+mod subscriptions_confirm;
+mod subscriptions_unsubscribe;
 // Rust测试框架自动添加一个Rust main函数

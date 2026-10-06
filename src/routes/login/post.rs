@@ -1,17 +1,17 @@
 //! src/routes/login/post.rs
 
 use crate::authentication::{validate_credentials, AuthError, Credentials};
-use crate::routes::error_chain_fmt;
+use crate::rate_limiting::{LoginRateLimiter, WINDOW_SECONDS};
+use crate::session_state::TypedSession;
+use crate::utils::error_chain_fmt;
 use actix_web::error::InternalError;
 use actix_web::http::header::LOCATION;
 use actix_web::web;
 use actix_web::HttpResponse;
-use secrecy::{Secret};
+use actix_web_flash_messages::FlashMessage;
+use secrecy::Secret;
 use sqlx::PgPool;
 use std::fmt::Formatter;
-use actix_web_flash_messages::FlashMessage;
-use crate::rate_limiting::{LoginRateLimiter, WINDOW_SECONDS};
-use crate::session_state::TypedSession;
 #[derive(serde::Deserialize)]
 pub struct FormData {
     username: String,
@@ -38,11 +38,11 @@ pub async fn login(
     form: web::Form<FormData>,
     pool: web::Data<PgPool>,
     session: TypedSession,
-    rate_limiter: web::Data<LoginRateLimiter>
+    rate_limiter: web::Data<LoginRateLimiter>,
 ) -> Result<HttpResponse, InternalError<LoginError>> {
     // 1）先限流
     match rate_limiter.try_acquire(&form.username).await {
-        Ok(true) => {/*放行，继续检验密码*/},
+        Ok(true) => { /*放行，继续检验密码*/ }
         Ok(false) => {
             // 访问超限
             return Ok(HttpResponse::TooManyRequests()
@@ -58,12 +58,13 @@ pub async fn login(
         username: form.0.username,
         password: form.0.password,
     };
-    tracing::Span::current().record("username", &tracing::field::display(&credentials.username));
+    tracing::Span::current().record("username", tracing::field::display(&credentials.username));
     match validate_credentials(credentials, &pool).await {
         Ok(user_id) => {
-            tracing::Span::current().record("user_id", &tracing::field::display(&user_id));
+            tracing::Span::current().record("user_id", tracing::field::display(&user_id));
             session.renew();
-            session.insert_user_id(user_id)
+            session
+                .insert_user_id(user_id)
                 .map_err(|e| login_redirect(LoginError::UnexpectedError(e.into())))?;
             Ok(HttpResponse::SeeOther()
                 .insert_header((LOCATION, "/admin/dashboard"))
@@ -76,10 +77,7 @@ pub async fn login(
             };
             FlashMessage::error(e.to_string()).send();
             let response = HttpResponse::SeeOther()
-                .insert_header((
-                    LOCATION,
-                    "/login",
-                ))
+                .insert_header((LOCATION, "/login"))
                 .finish();
             Err(InternalError::from_response(e, response))
         }

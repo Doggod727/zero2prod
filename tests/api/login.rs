@@ -210,7 +210,7 @@ async fn concurrent_attempts_respect_the_limit_atomically() {
         let body = body.clone();
         tasks.push(tokio::spawn(async move {
             client
-                .post(&format!("{address}/login"))
+                .post(format!("{address}/login"))
                 .form(&body)
                 .send()
                 .await
@@ -326,4 +326,3 @@ async fn seed_login_history(username: &str, seconds_ago: &[i64]) {
             .unwrap();
     }
 }
-

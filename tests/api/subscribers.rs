@@ -95,10 +95,7 @@ async fn subscribers_list_paginates_without_gaps_or_overlaps() {
         "遍历完所有页后应当恰好看到 45 个不同的订阅者（不重叠、不遗漏），实际 {}",
         seen.len()
     );
-    assert_eq!(
-        total_before_dedup, 45,
-        "不应当有任何订阅者在两页里重复出现"
-    );
+    assert_eq!(total_before_dedup, 45, "不应当有任何订阅者在两页里重复出现");
     assert_eq!(pages, 3, "45 条、每页 20 条 → 应当是 3 页");
 }
 

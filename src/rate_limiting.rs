@@ -22,7 +22,7 @@ pub struct LoginRateLimiter {
 
 impl LoginRateLimiter {
     pub fn new(connection_manager: ConnectionManager) -> Self {
-        Self {connection_manager}
+        Self { connection_manager }
     }
     pub async fn try_acquire(&self, username: &str) -> Result<bool, redis::RedisError> {
         let now_ms = std::time::SystemTime::now()

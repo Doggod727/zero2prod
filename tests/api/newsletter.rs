@@ -1,11 +1,11 @@
 //! test/api/newsletter.rs
 use crate::helpers::{assert_is_redirect_to, spawn_app, ConfirmationLinks, TestApp};
-use wiremock::matchers::{any, method, path};
-use wiremock::{Mock, MockBuilder, ResponseTemplate};
-use std::time::Duration;
-use fake::Fake;
 use fake::faker::internet::en::SafeEmail;
 use fake::faker::name::en::Name;
+use fake::Fake;
+use std::time::Duration;
+use wiremock::matchers::{any, method, path};
+use wiremock::{Mock, MockBuilder, ResponseTemplate};
 
 fn newsletter_request_body() -> serde_json::Value {
     serde_json::json!({
@@ -33,9 +33,7 @@ async fn newsletters_are_not_delivered_to_unconfirmed_subscribers() {
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     let html_page = app.get_newsletters_html().await;
-    assert!(html_page.contains(
-        "<p><i>The newsletter issue has been published</i></p>"
-    ));
+    assert!(html_page.contains("<p><i>The newsletter issue has been published</i></p>"));
 }
 #[tokio::test]
 async fn newsletters_are_delivered_to_confirmed_subscribers() {
@@ -120,11 +118,7 @@ async fn newsletter_creation_is_idempotent() {
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     let html_page = app.get_newsletters_html().await;
-    assert!(
-        html_page.contains(
-            "<p><i>The newsletter issue has been published</i></p>"
-        )
-    );
+    assert!(html_page.contains("<p><i>The newsletter issue has been published</i></p>"));
 
     let newsletter_request_body = serde_json::json!({
         "title": "Newsletter title",
@@ -137,16 +131,12 @@ async fn newsletter_creation_is_idempotent() {
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     let html_page = app.get_newsletters_html().await;
-    assert!(
-        html_page.contains(
-            "<p><i>The newsletter issue has been published</i></p>"
-        )
-    );
+    assert!(html_page.contains("<p><i>The newsletter issue has been published</i></p>"));
 }
 
 #[tokio::test]
 async fn concurrent_form_submission_is_handled_gracefully() {
-     let app = spawn_app().await;
+    let app = spawn_app().await;
     create_confirmed_subscriber(&app).await;
     app.test_user.login(&app).await;
 
@@ -176,7 +166,10 @@ async fn concurrent_form_submission_is_handled_gracefully() {
     let (response1, response2) = tokio::join!(response1, response2);
 
     assert_eq!(response1.status(), response2.status());
-    assert_eq!(response1.text().await.unwrap(), response2.text().await.unwrap());
+    assert_eq!(
+        response1.text().await.unwrap(),
+        response2.text().await.unwrap()
+    );
 }
 fn when_sending_an_email() -> MockBuilder {
     Mock::given(path("/email")).and(method("POST"))
@@ -239,9 +232,7 @@ async fn a_failed_delivery_is_retried_once_the_backoff_has_elapsed() {
         .mount(&app.email_server)
         .await;
 
-    let response = app
-        .post_newsletters(body_with(&idempotency_key))
-        .await;
+    let response = app.post_newsletters(body_with(&idempotency_key)).await;
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     // 把 newsletter 任务的退避时间拨回到过去，模拟"退避期已过"
@@ -259,9 +250,7 @@ async fn a_failed_delivery_is_retried_once_the_backoff_has_elapsed() {
         .await;
 
     // 同一个幂等键：不会再扇出新任务，只会在请求内 drain 掉那条等待重试的任务
-    let response = app
-        .post_newsletters(body_with(&idempotency_key))
-        .await;
+    let response = app.post_newsletters(body_with(&idempotency_key)).await;
     assert_is_redirect_to(&response, "/admin/newsletters");
 
     let remaining = sqlx::query!(
@@ -363,11 +352,11 @@ async fn expire_backoff_of_newsletter_tasks(app: &TestApp) {
 async fn create_unconfirmed_subscriber(app: &TestApp) -> ConfirmationLinks {
     let name: String = Name().fake();
     let email: String = SafeEmail().fake();
-    let body = serde_urlencoded::to_string(&serde_json::json!({
+    let body = serde_urlencoded::to_string(serde_json::json!({
         "name": name,
         "email": email
     }))
-        .unwrap();
+    .unwrap();
 
     let _mock_guard = Mock::given(path("/email"))
         .and(method("POST"))
@@ -376,7 +365,7 @@ async fn create_unconfirmed_subscriber(app: &TestApp) -> ConfirmationLinks {
         .expect(1)
         .mount_as_scoped(&app.email_server)
         .await;
-    app.post_subscriptions(body.into())
+    app.post_subscriptions(body)
         .await
         .error_for_status()
         .unwrap();
@@ -388,7 +377,7 @@ async fn create_unconfirmed_subscriber(app: &TestApp) -> ConfirmationLinks {
         .unwrap()
         .pop()
         .unwrap();
-    app.get_confirmation_links(&email_request)
+    app.get_confirmation_links(email_request)
 }
 
 async fn create_confirmed_subscriber(app: &TestApp) {
@@ -398,4 +387,207 @@ async fn create_confirmed_subscriber(app: &TestApp) {
         .unwrap()
         .error_for_status()
         .unwrap();
+}
+
+// ============================================================
+// 幂等键的过期语义
+// ============================================================
+//
+// 这三条测试钉住的是同一件事的不同侧面：**处理中的行和已完成的行，清扫规则完全不同**。
+//
+//   · 已完成 → TTL 到点，删掉（它只是一份缓存）
+//   · 处理中且够旧 → 不能删，要让下一个请求【接管】（请求崩了，键不该被永久锁死）
+//   · 处理中且还新 → 谁也不能碰（真的有请求在跑，接管会重复发信）
+
+/// 把一个幂等键的 create_at 推到过去，模拟"时间已经过去了"。
+///
+/// 为什么直接改 create_at 而不是真的等：TTL 是 24 小时、租约是 5 分钟，
+/// 真等的话测试跑不完。改 create_at 等价于"这个键是 N 分钟前创建的"，
+/// 而且被测代码的判断条件就是 create_at，所以这是对被测语义的精确操控，
+/// 不是对实现的取巧。
+async fn backdate_idempotency_key(app: &TestApp, key: &str, minutes_ago: i32) {
+    let user_id = app.test_user.user_id;
+    let affected = sqlx::query!(
+        "UPDATE idempotency SET create_at = now() - make_interval(mins => $3)
+         WHERE user_id = $1 AND idempotency_key = $2",
+        user_id,
+        key,
+        minutes_ago
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to backdate the idempotency key")
+    .rows_affected();
+    assert_eq!(affected, 1, "没有找到要回拨的幂等键，种子数据不对");
+}
+
+/// 种一条"处理中"的幂等键：response_body 为 NULL，表示有个请求开了头却没写完响应。
+async fn seed_processing_key(app: &TestApp, key: &str) {
+    sqlx::query!(
+        "INSERT INTO idempotency (user_id, idempotency_key, create_at) VALUES ($1, $2, now())",
+        app.test_user.user_id,
+        key
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to seed an in-flight idempotency key");
+}
+
+/// 种一条"已完成"的幂等键。
+async fn seed_completed_key(app: &TestApp, key: &str) {
+    sqlx::query!(
+        r#"
+        INSERT INTO idempotency
+            (user_id, idempotency_key, response_status_code, response_headers, response_body, create_at)
+        VALUES ($1, $2, 303, '{}'::header_pair[], '\x00'::bytea, now())
+        "#,
+        app.test_user.user_id,
+        key
+    )
+    .execute(&app.db_pool)
+    .await
+    .expect("Failed to seed a completed idempotency key");
+}
+
+/// ⭐ 崩溃恢复：一个开了头就死掉的请求，不该把这个幂等键永久锁死。
+///
+/// 场景：客户端提交 → 请求开跑 → 客户端断连 / 进程被杀 / 部署中断。
+/// 那一行的 response_body 永远是 NULL。没有接管机制的话，用户重试这个 key
+/// 会永远拿到 500，而且他什么也做不了 —— 这个键被【永久锁死】了。
+#[tokio::test]
+async fn a_stale_in_flight_idempotency_key_is_taken_over_instead_of_deadlocking() {
+    let app = spawn_app().await;
+    create_confirmed_subscriber(&app).await;
+    app.test_user.login(&app).await;
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&app.email_server)
+        .await;
+
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+    seed_processing_key(&app, &idempotency_key).await;
+    // 上一轮请求已经死了（比 5 分钟的租约旧）
+    backdate_idempotency_key(&app, &idempotency_key, 6).await;
+
+    let response = app.post_newsletters(body_with(&idempotency_key)).await;
+
+    assert_is_redirect_to(&response, "/admin/newsletters");
+    let page = app.get_newsletters_html().await;
+    assert!(
+        page.contains("<p><i>The newsletter issue has been published</i></p>"),
+        "接管之后没有正常发布"
+    );
+
+    // 接管 = 把 create_at 推到 now()，于是这一行重新变成"刚被领取"，
+    // 后续 save_response 能正常写进去。
+    let row = sqlx::query!(
+        "SELECT create_at, response_body FROM idempotency
+         WHERE user_id = $1 AND idempotency_key = $2",
+        app.test_user.user_id,
+        idempotency_key
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .unwrap();
+    assert!(
+        row.response_body.is_some(),
+        "接管之后响应没被存下来 —— 下一次重试又会当成全新请求"
+    );
+}
+
+/// 反面：状态还新鲜的"处理中"键【不能】被接管。
+///
+/// 这正是 concurrent_form_submission_is_handled_gracefully 依赖的行为：
+/// 用户双击提交 / 两个标签页同时发，第二个请求必须老老实实失败，
+/// 而不是也去发一遍信。
+#[tokio::test]
+async fn a_fresh_in_flight_idempotency_key_is_not_taken_over() {
+    let app = spawn_app().await;
+    create_confirmed_subscriber(&app).await;
+    app.test_user.login(&app).await;
+
+    Mock::given(path("/email"))
+        .and(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0) // 关键：一封都不该发出去
+        .mount(&app.email_server)
+        .await;
+
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+    seed_processing_key(&app, &idempotency_key).await;
+    // 才 1 分钟，远在 5 分钟租约之内 —— 当它是"真的有请求在跑"
+    backdate_idempotency_key(&app, &idempotency_key, 1).await;
+
+    let response = app.post_newsletters(body_with(&idempotency_key)).await;
+
+    assert_eq!(
+        response.status().as_u16(),
+        500,
+        "新鲜的 in-flight 键被接管了 —— 两个请求会同时发信"
+    );
+}
+
+/// sweeper 只回收【已完成】的过期条目，绝不碰处理中的行。
+///
+/// 为什么"不碰处理中的"这么重要，见 README 的决策卡，这里给两个具体的坏结果：
+///   ① 原请求回来 save_response 时 UPDATE 0 行，成果被静默丢弃；
+///   ② 用户重试同一个 key 会撞上"INSERT 冲突但查不到已存响应" → 500。
+#[tokio::test]
+async fn the_sweeper_only_deletes_completed_and_expired_entries() {
+    let app = spawn_app().await;
+
+    let old_completed = uuid::Uuid::new_v4().to_string();
+    let fresh_completed = uuid::Uuid::new_v4().to_string();
+    let old_processing = uuid::Uuid::new_v4().to_string();
+
+    seed_completed_key(&app, &old_completed).await;
+    seed_completed_key(&app, &fresh_completed).await;
+    seed_processing_key(&app, &old_processing).await;
+
+    let expired_minutes = zero2prod::idempotency::COMPLETED_TTL_MINUTES + 60;
+    backdate_idempotency_key(&app, &old_completed, expired_minutes).await;
+    // 这一条虽然处理中、而且很旧 —— 但它必须活下来
+    backdate_idempotency_key(
+        &app,
+        &old_processing,
+        zero2prod::idempotency::STALE_PROCESSING_TTL_MINUTES + 60,
+    )
+    .await;
+
+    let outcome = zero2prod::idempotency::sweep(&app.db_pool)
+        .await
+        .expect("sweep failed");
+
+    assert_eq!(
+        outcome.deleted_completed, 1,
+        "应该只删掉那一条已完成的过期条目"
+    );
+
+    let survivors: Vec<String> = sqlx::query!(
+        "SELECT idempotency_key FROM idempotency WHERE user_id = $1",
+        app.test_user.user_id
+    )
+    .fetch_all(&app.db_pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| r.idempotency_key)
+    .collect();
+
+    assert!(
+        !survivors.contains(&old_completed),
+        "已完成的过期条目没有被回收"
+    );
+    assert!(
+        survivors.contains(&fresh_completed),
+        "还在 TTL 内的条目被误删了 —— 用户在 TTL 内重试会重复发信"
+    );
+    assert!(
+        survivors.contains(&old_processing),
+        "处理中的条目被 sweeper 删掉了 —— 那个还在跑的请求成果会静默丢失，\
+         用户重试同一个 key 会拿到 500"
+    );
 }

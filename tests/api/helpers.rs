@@ -4,9 +4,10 @@ use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 use once_cell::sync::Lazy;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use uuid::Uuid;
-use wiremock::MockServer;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zero2prod::configurations::{get_configurations, DatabaseSettings};
-use zero2prod::startup::{Application};
+use zero2prod::startup::Application;
 use zero2prod::telemetry::{get_subscriber, init_subscriber};
 
 // 使用once_cell确保tracing只能被初始化一次
@@ -42,7 +43,7 @@ impl TestUser {
         Self {
             user_id: Uuid::new_v4(),
             username: Uuid::new_v4().to_string(),
-            password: Uuid::new_v4().to_string()
+            password: Uuid::new_v4().to_string(),
         }
     }
     async fn store(&self, pool: &PgPool) {
@@ -65,8 +66,10 @@ impl TestUser {
         .execute(pool)
         .await
         .expect("Failed to store test user");
-        dbg!(&self.user_id);
-        dbg!(&password_hash);
+        // 这里原本有两行 dbg!(&self.user_id) / dbg!(&password_hash)。
+        // 删掉的原因：每个测试都会往 stdout 打一遍 user_id 和【密码哈希】，
+        // 75 个测试就是 150 行噪音，而且会把凭据材料写进 CI 日志。
+        // 调试测试用户时用 TEST_LOG=1 看 tracing 输出，不要再加 dbg!。
     }
 
     pub async fn login(&self, app: &TestApp) {
@@ -162,7 +165,7 @@ impl Drop for TestApp {
 impl TestApp {
     pub async fn post_subscriptions(&self, body: String) -> reqwest::Response {
         self.api_client
-            .post(&format!("{}/subscriptions", &self.address))
+            .post(format!("{}/subscriptions", self.address))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body)
             .send()
@@ -173,7 +176,7 @@ impl TestApp {
     /// GET /subscriptions —— 渲染订阅表单（也是 POST 之后 303 的落点）
     pub async fn get_subscriptions(&self) -> reqwest::Response {
         self.api_client
-            .get(&format!("{}/subscriptions", &self.address))
+            .get(format!("{}/subscriptions", self.address))
             .send()
             .await
             .expect("Failed to execute request.")
@@ -198,10 +201,104 @@ impl TestApp {
         Ok(())
     }
 
+    /// 只统计【真的发给邮件服务】的请求（POST /email）。
+    ///
+    /// ⚠️ 不要直接用 `email_server.received_requests().len()`：
+    ///    wiremock 记的是它收到的【全部】请求，任何打到它端口上的东西都算。
+    ///    一旦某个 URL 忘了改端口（见 get_confirmation_links 的注释），
+    ///    一个 GET 就会被当成一封邮件，断言就会以"数量不对"的形式失败，
+    ///    而错误信息完全看不出多出来的是什么。
+    pub async fn emails_sent(&self) -> Vec<wiremock::Request> {
+        self.email_server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.method == wiremock::http::Method::Post && r.url.path() == "/email")
+            .collect()
+    }
+    /// GET /subscriptions/unsubscribe?unsubscription_token=...
+    pub async fn get_unsubscribe_page(&self, token: &str) -> reqwest::Response {
+        self.api_client
+            .get(format!(
+                "{}/subscriptions/unsubscribe?unsubscription_token={}",
+                self.address, token
+            ))
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    /// GET 一个 URL（已经是完整地址，例如从邮件里抠出来的退订链接）。
+    pub async fn get_url(&self, url: reqwest::Url) -> reqwest::Response {
+        self.api_client
+            .get(url)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    /// POST /subscriptions/unsubscribe?unsubscription_token=...
+    ///
+    /// `one_click` 为 true 时模拟邮件客户端：body 是 RFC 8058 规定的
+    /// `List-Unsubscribe=One-Click`。这个 body 不是我们的表单结构，
+    /// 如果 handler 用 web::Form 解析它就会 400 —— 这个参数就是用来钉住这一点的。
+    ///
+    /// ⚠️ 注意这里【没有】设置 Content-Type：实际上各家客户端带不带它并不统一，
+    ///    而我们的 handler 只读 query，所以两种情况都必须能过。
+    pub async fn post_unsubscribe(&self, token: &str, one_click: bool) -> reqwest::Response {
+        let request = self.api_client.post(format!(
+            "{}/subscriptions/unsubscribe?unsubscription_token={}",
+            self.address, token
+        ));
+        // ⚠️ 这个 Content-Type 是必须的，不是可选的：
+        //    这里用 .post() 而不是 .form()，所以请求头得自己给。
+        //    没有它的话 actix 的 FormConfig 会因为"Content-Type 不是表单类型"
+        //    直接判失败，连解析都不做 —— 表现是 400、日志里只有一句
+        //    "Content type error"，完全看不出是测试自己没带头。
+        let request = request.header("Content-Type", "application/x-www-form-urlencoded");
+        let request = if one_click {
+            request.body("List-Unsubscribe=One-Click")
+        } else {
+            request
+        };
+        request.send().await.expect("Failed to execute request.")
+    }
+
+    /// 挂一个"任何邮件请求都返回 200"的 catch-all mock。
+    ///
+    /// 退订场景需要它：退订会立刻 drain 队列去发那封"你已退订"通知。
+    /// 没有 mock 的话发信失败 → 任务被记成"等待退避"留在队列里，
+    /// 于是"队列里有几条通知"这个断言测的是退避状态，而不是业务语义。
+    pub async fn mock_email_server_returning_200(&self) {
+        Mock::given(path("/email"))
+            .and(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&self.email_server)
+            .await;
+    }
+
+    /// 从邮件正文里抠出【确认】链接并把端口换成本实例的端口。
+    pub fn confirmation_link_from(&self, email_body: &serde_json::Value) -> reqwest::Url {
+        let html = email_body["HtmlBody"].as_str().expect("邮件没有 HtmlBody");
+        let links: Vec<String> = linkify::LinkFinder::new()
+            .links(html)
+            .filter(|l| *l.kind() == linkify::LinkKind::Url)
+            .map(|l| l.as_str().to_owned())
+            .collect();
+        let raw = links
+            .into_iter()
+            .find(|l| l.contains("/subscriptions/confirm"))
+            .expect("正文里找不到确认链接");
+        let mut url = reqwest::Url::parse(&raw).unwrap();
+        url.set_port(Some(self.port)).unwrap();
+        url
+    }
+
     /// GET /admin/subscribers —— 订阅者列表（可带游标）
     pub async fn get_subscribers_page(&self, query: &str) -> reqwest::Response {
         self.api_client
-            .get(&format!("{}/admin/subscribers{}", &self.address, query))
+            .get(format!("{}/admin/subscribers{}", self.address, query))
             .send()
             .await
             .expect("Failed to execute request.")
@@ -211,32 +308,80 @@ impl TestApp {
         self.get_subscribers_page(query).await.text().await.unwrap()
     }
 
+    /// 从邮件 body 里抠出 List-Unsubscribe 头指向的 URL。
+    ///
+    /// ⚠️ 不能直接用 body["Headers"] —— 测试用的 wiremock 是【替身】，
+    ///    它收到的 body 是 Postmark 的 JSON 结构，Headers 是个数组。
+    ///    这里传整个 body 进来，按 Name 找，再剥掉 RFC 8058 要求的尖括号。
+    pub fn unsubscribe_url_from(&self, email_body: &serde_json::Value) -> Option<reqwest::Url> {
+        let headers = email_body.get("Headers")?.as_array()?;
+        let raw = headers
+            .iter()
+            .find(|h| h.get("Name").and_then(|n| n.as_str()) == Some("List-Unsubscribe"))?
+            .get("Value")?
+            .as_str()?;
+        // RFC 8058 规定 URI 包在 <> 里
+        let bare = raw.trim().trim_start_matches('<').trim_end_matches('>');
+        let mut url = reqwest::Url::parse(bare).ok()?;
+
+        // ⚠️ 必须改端口。这个 URL 是 EmailClient 用【配置里的】base_url 拼的，
+        //    而配置写的是 `http://localhost`（没有端口）——
+        //    它和正文链接不是同一个来源：正文来自 base_url（测试里被换成 mock 端口），
+        //    header 来自配置里的 application.base_url。
+        //    不改端口的话，测试客户端会去连 80 端口，报 ConnectionRefused，
+        //    报错信息里那个 `port: None` 就是线索。
+        if url.host_str() == Some("127.0.0.1") || url.host_str() == Some("localhost") {
+            url.set_port(Some(self.port)).ok()?;
+        }
+        Some(url)
+    }
+
     /// 从发送给邮件API的邮件中提取出确认连接
     pub fn get_confirmation_links(&self, email_request: &wiremock::Request) -> ConfirmationLinks {
         let body: serde_json::Value = serde_json::from_slice(&email_request.body).unwrap(); // 服务器发送的http请求的请求体
 
-        // 从指定连接中提取连接
+        // 从指定正文里提取【确认】链接。
+        //
+        // ⚠️ 不能写成"断言正文里只有一个链接"：一封邮件现在带两个链接
+        //    ——确认链接 + 正文底部的退订链接（退订入口是合规要求，
+        //    而 List-Unsubscribe 头只服务那些认这个头的客户端，
+        //    正文里那个可见链接才是兜底）。
+        //    所以这里【按路径筛】而不是按数量断言。
         let get_links = |s: &str| {
             let links: Vec<_> = linkify::LinkFinder::new()
                 .links(s)
                 .filter(|l| *l.kind() == linkify::LinkKind::Url)
+                .map(|l| l.as_str().to_owned())
                 .collect();
-            assert_eq!(links.len(), 1);
-            let raw_link = links[0].as_str().to_owned();
+            assert!(!links.is_empty(), "邮件正文里一个链接都没有");
+
+            let raw_link = links
+                .into_iter()
+                .find(|l| l.contains("/subscriptions/confirm"))
+                .unwrap_or_else(|| panic!("正文里找不到确认链接"));
+
             let mut confirmation_link = reqwest::Url::parse(&raw_link).unwrap();
             assert_eq!(confirmation_link.host_str().unwrap(), "127.0.0.1");
+            // 邮件正文里的链接带的是【wiremock 的端口】（base_url = mock_server.uri()），
+            // 要把它改到真正的服务端口上。
+            //
+            // ⚠️ 别去掉这一行：不改端口的话，测试会去请求 wiremock 自己。
+            //    而 wiremock 的 received_requests() 记录的是【收到的所有请求】，
+            //    不只是匹配 mock 的那些 —— 于是那些 GET 会被算进"发了多少封邮件"，
+            //    让数量断言失败。这个坑很隐蔽：报错只说数量不对，
+            //    看不出多出来的是什么（所以另外提供了 TestApp::emails_sent）。
             confirmation_link.set_port(Some(self.port)).unwrap();
             confirmation_link
         };
 
-        let html = get_links(&body["HtmlBody"].as_str().unwrap());
-        let plain_text = get_links(&body["TextBody"].as_str().unwrap());
+        let html = get_links(body["HtmlBody"].as_str().unwrap());
+        let plain_text = get_links(body["TextBody"].as_str().unwrap());
         ConfirmationLinks { html, plain_text }
     }
 
     pub async fn post_newsletters(&self, body: serde_json::Value) -> reqwest::Response {
         self.api_client
-            .post(&format!("{}/admin/newsletters", &self.address))
+            .post(format!("{}/admin/newsletters", self.address))
             .form(&body)
             .send()
             .await
@@ -245,7 +390,7 @@ impl TestApp {
 
     pub async fn get_newsletters(&self) -> reqwest::Response {
         self.api_client
-            .get(&format!("{}/admin/newsletters", &self.address))
+            .get(format!("{}/admin/newsletters", self.address))
             .send()
             .await
             .expect("Failed to execute request.")
@@ -263,7 +408,7 @@ impl TestApp {
         // 提交无效表单 -> 登录错误303
         // 重定向到GET /login, 返回200
         self.api_client
-            .post(&format!("{}/login", &self.address))
+            .post(format!("{}/login", self.address))
             .form(body)
             .send()
             .await
@@ -272,7 +417,7 @@ impl TestApp {
 
     pub async fn get_login_html(&self) -> String {
         self.api_client
-            .get(&format!("{}/login", &self.address))
+            .get(format!("{}/login", self.address))
             .send()
             .await
             .expect("Failed to execute request.")
@@ -283,7 +428,7 @@ impl TestApp {
 
     pub async fn get_admin_dashboard(&self) -> reqwest::Response {
         self.api_client
-            .get(&format!("{}/admin/dashboard", &self.address))
+            .get(format!("{}/admin/dashboard", self.address))
             .send()
             .await
             .expect("Failed to execute request.")
@@ -294,17 +439,18 @@ impl TestApp {
 
     pub async fn get_change_password(&self) -> reqwest::Response {
         self.api_client
-            .get(&format!("{}/admin/password", &self.address))
+            .get(format!("{}/admin/password", self.address))
             .send()
             .await
             .expect("Failed to execute request.")
     }
 
     pub async fn post_change_password<Body>(&self, body: &Body) -> reqwest::Response
-        where
-            Body: serde::Serialize {
+    where
+        Body: serde::Serialize,
+    {
         self.api_client
-            .post(&format!("{}/admin/password", &self.address))
+            .post(format!("{}/admin/password", self.address))
             .form(&body)
             .send()
             .await
@@ -313,10 +459,10 @@ impl TestApp {
     pub async fn get_change_password_html(&self) -> String {
         self.get_change_password().await.text().await.unwrap()
     }
-    
+
     pub async fn post_logout(&self) -> reqwest::Response {
         self.api_client
-            .post(&format!("{}/admin/logout", &self.address))
+            .post(format!("{}/admin/logout", self.address))
             .send()
             .await
             .expect("Failed to execute request")
@@ -347,10 +493,13 @@ pub async fn spawn_app() -> TestApp {
         .await
         .expect("Failed to build application");
     let application_port = application.port();
-    // 在应用启动之前获取端
-    // 启动服务器作为后台任务
-    // tokio::spawn返回一个指向spawned future的handle
-    let _ = tokio::spawn(application.run_until_stopped());
+    // 启动服务器作为后台任务。
+    //
+    // 这里刻意【不】绑定 JoinHandle：测试结束时不 join、也不 abort，
+    // 靠 TestApp 的 Drop 去 kill 会话 + DROP DATABASE 收尾。
+    // 写成 `let _ = tokio::spawn(..)` 会被 clippy 的 let_underscore_future 拦下
+    // （它以为你忘了持有那个 future）—— 直接当语句调用，把【故意脱离】写成代码的样子。
+    tokio::spawn(application.run_until_stopped());
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .cookie_store(true)

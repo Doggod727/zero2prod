@@ -10,9 +10,7 @@ impl TryFrom<String> for IdempotencyKey {
         }
         let max_length = 50;
         if value.len() >= max_length {
-            anyhow::bail!(
-                "The idempotency key must be shorter than {max_length} characters"
-            );
+            anyhow::bail!("The idempotency key must be shorter than {max_length} characters");
         }
         Ok(Self(value))
     }

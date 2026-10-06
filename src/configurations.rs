@@ -130,7 +130,7 @@ pub struct EmailClientSettings {
 
 impl EmailClientSettings {
     pub fn sender(&self) -> Result<SubscriberEmail, String> {
-        Ok(SubscriberEmail::parse(self.sender_email.clone())?)
+        SubscriberEmail::parse(self.sender_email.clone())
     }
 
     pub fn timeout(&self) -> std::time::Duration {
