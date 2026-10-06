@@ -330,11 +330,23 @@ async fn record_failure(
         .await?;
     Ok(())
 }
-async fn worker_loop(pool: PgPool, email_client: EmailClient, base_url: &str) -> Result<(), anyhow::Error> {
+async fn worker_loop(
+    pool: PgPool,
+    email_client: EmailClient,
+    base_url: &str,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), anyhow::Error> {
     loop {
+        if *shutdown.borrow() {
+            tracing::info!("Worker received shutdown signal, stopping after the current task.");
+            return Ok(())
+        }
         match try_execute_task(&pool, &email_client, base_url).await {
             Ok(ExecutionOutcome::EmptyQueue) => {
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    _ = shutdown.changed() => {}
+                }
             }
             // 注意：投递失败**不会**走到这里 —— 失败已经被 record_failure
             // 记录成"等待退避"，并返回 Ok(TaskCompleted)。
@@ -342,14 +354,18 @@ async fn worker_loop(pool: PgPool, email_client: EmailClient, base_url: &str) ->
             // 这种情况下短暂等待再重试是合理的。
             Err(e) => {
                 tracing::error!(error.cause_chain = ?e, error.message = %e, "Worker failed to execute a task");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    _ = shutdown.changed() => {}
+                }
             }
             Ok(ExecutionOutcome::TaskCompleted) => {}
         }
     }
 }
 
-pub async fn run_worker_until_stopped(configuration: Settings) -> Result<(), anyhow::Error> {
+pub async fn run_worker_until_stopped(configuration: Settings, shutdown: tokio::sync::watch::Receiver<bool>) -> Result<(), anyhow::Error> {
     let connection_pool = get_connection_pool(&configuration.database);
 
     let sender_email = configuration
@@ -364,7 +380,7 @@ pub async fn run_worker_until_stopped(configuration: Settings) -> Result<(), any
         timeout,
     );
 
-    worker_loop(connection_pool, email_client, configuration.application.base_url.as_str()).await
+    worker_loop(connection_pool, email_client, configuration.application.base_url.as_str(), shutdown).await
 }
 
 #[cfg(test)]

@@ -14,15 +14,30 @@ async fn main() -> anyhow::Result<()> {
     // 如果不能读取配置的话，发生panic
     let configuration = get_configurations().expect("Failed to read configurations.");
 
-    let application = Application::build(configuration.clone()).await?;
-    let application_task = tokio::spawn(application.run_until_stopped());
-    let worker_task = tokio::spawn(run_worker_until_stopped(configuration));
+    let mut application = Application::build(configuration.clone()).await?;
+    let terminate_handle = application.terminate_handle();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut application_task = tokio::spawn(application.run_until_stopped());
+    let mut worker_task = tokio::spawn(run_worker_until_stopped(configuration, shutdown_rx));
 
     tokio::select! {
-        o = application_task => report_exit("API", o),
-        o = worker_task => report_exit("Background worker", o),
-    };
-
+        o = &mut application_task => report_exit("API", o),
+        o = &mut worker_task => report_exit("Background worker", o),
+        _ = zero2prod::shutdown::terminate_signal() => {
+            tracing::info!("Shutdown signal received, terminating the API gracefully");
+        }
+    }
+    let _ = shutdown_tx.send(true);
+    if let Some(handle) = terminate_handle {
+        handle.stop(true).await;
+    }
+    if let Ok(outcome) = application_task.await {
+        report_exit("API", Ok(outcome));
+    }
+    if let Ok(outcome ) = worker_task.await {
+        report_exit("Background worker", Ok(outcome));
+    }
     Ok(())
 }
 

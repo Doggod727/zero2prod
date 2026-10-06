@@ -11,3 +11,4 @@ pub mod idempotency;
 pub mod utils;
 pub mod rate_limiting;
 pub mod issue_delivery_worker;
+pub mod shutdown;

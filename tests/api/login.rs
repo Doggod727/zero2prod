@@ -236,3 +236,94 @@ async fn concurrent_attempts_respect_the_limit_atomically() {
     );
     assert_eq!(limited, 5, "其余的应当全部被限流");
 }
+
+/// 【滑动窗口的关键证明】窗口会“逐条滑出”，而不是“整桶清零”。
+///
+/// 构造：往 Redis 里直接伪造 5 条历史记录，让它们的发生时间分别落在
+/// 窗口内和窗口外：
+///
+///     现在 - 61 秒  ← 已经滑出窗口
+///     现在 - 59 秒  ← 仍在窗口内
+///     现在 - 58 秒  ← 仍在窗口内
+///     现在 - 30 秒  ← 仍在窗口内
+///     现在 - 5 秒   ← 仍在窗口内
+///
+/// 然后打一次新请求。断言它【被放行】，因为：
+///   - 滑动窗口会先删掉“61 秒前”那条，数到 4 < 5 → 放行；
+///   - 如果是固定窗口，计数还是 5（那个键的 TTL 没到）→ 会拒绝。
+///
+/// 注意这条测试直接操作 Redis 的 ZSET 来伪造历史，而不是真的等 60 秒。
+#[tokio::test]
+async fn the_window_slides_instead_of_resetting_as_a_whole_bucket() {
+    let app = spawn_app().await;
+    let username = uuid::Uuid::new_v4().to_string();
+    let login_body = serde_json::json!({
+        "username": &username,
+        "password": "wrong-password",
+    });
+
+    // 场景 A：窗口内已有 5 条 → 必须拒绝。
+    // （注意：这里刻意【不】依赖“刚好卡在边界”，避免测试因耗时波动而 flaky）
+    app.reset_login_rate_limit(&username).await.unwrap();
+    seed_login_history(&username, &[50, 40, 30, 20, 10]).await;
+    let response = app.post_login(&login_body).await;
+    assert_eq!(
+        429,
+        response.status().as_u16(),
+        "窗口内已经有 5 条记录时，应当被限流"
+    );
+
+    // 场景 B：唯一的一条刚好滑出窗口（61 秒前）→ 必须放行。
+    // 这正是“滑动”的含义：逐条滑出，而不是整桶清零。
+    app.reset_login_rate_limit(&username).await.unwrap();
+    seed_login_history(&username, &[61, 40, 30, 20, 10]).await;
+    let response = app.post_login(&login_body).await;
+    assert_eq!(
+        303,
+        response.status().as_u16(),
+        "那条 61 秒前的记录已滑出窗口，窗口内只剩 4 条 → 应当放行"
+    );
+
+    // 场景 C：窗口外的一批（全部 61 秒以上）→ 必须放行，且放行后计数从 0 开始
+    app.reset_login_rate_limit(&username).await.unwrap();
+    seed_login_history(&username, &[120, 110, 100, 90, 80]).await;
+    for attempt in 1..=5 {
+        let response = app.post_login(&login_body).await;
+        assert_eq!(
+            303,
+            response.status().as_u16(),
+            "窗口外记录不该计数，第 {attempt} 次应当放行"
+        );
+    }
+    let response = app.post_login(&login_body).await;
+    assert_eq!(
+        429,
+        response.status().as_u16(),
+        "窗口内补满 5 条后，第 6 次应当被限流"
+    );
+}
+
+/// 分数是时间戳本身，因为滑动窗口靠分数做范围删除。
+async fn seed_login_history(username: &str, seconds_ago: &[i64]) {
+    let key = format!("login:rate_limit:{username}");
+    let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+    let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    for (index, seconds) in seconds_ago.iter().enumerate() {
+        let timestamp = now_ms - seconds * 1000;
+        let member = format!("{timestamp}:{index}");
+        let _: i64 = redis::cmd("ZADD")
+            .arg(&key)
+            .arg(timestamp)
+            .arg(&member)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+}
+

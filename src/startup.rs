@@ -5,7 +5,7 @@ use crate::email_client::EmailClient;
 use crate::routes::{admin_dashboard, change_password, change_password_form, newsletter_form, subscribe, subscribers_list};
 use crate::routes::{confirm, health_check, home, login, log_out, login_form, publish_newsletter};
 use crate::routes::subscription_form;
-use actix_web::dev::Server;
+use actix_web::dev::{Server, ServerHandle};
 use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer};
 use secrecy::Secret;
@@ -28,6 +28,7 @@ pub struct HmacSecret(pub Secret<String>);
 pub struct Application {
     port: u16,
     server: Server,
+    terminate_handle: Option<ServerHandle>
 }
 
 impl Application {
@@ -62,15 +63,18 @@ impl Application {
             configuration.application.hmac_secret,
             configuration.redis_uri
         ).await?;
-
+        let terminate_handle = Some(server.handle());
         // 将绑定值保存在Application结构体中
-        Ok(Self { port, server })
+        Ok(Self { port, server , terminate_handle})
     }
 
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    pub fn terminate_handle(&mut self) -> Option<ServerHandle> {
+        self.terminate_handle.take()
+    }
     // 表明此函数只在程序停止后停止
     pub async fn run_until_stopped(self) -> Result<(), std::io::Error> {
         self.server.await
