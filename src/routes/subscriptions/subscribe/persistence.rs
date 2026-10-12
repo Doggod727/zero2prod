@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// 订阅接口的数据访问层：所有和 subscriptions / subscription_tokens 两张表
 /// 打交道的 SQL 都集中在这里，handler 只负责编排。
-pub async fn insert_subscriber(
+pub async fn  insert_subscriber(
     transaction: &mut Transaction<'_, Postgres>,
     new_subscriber: &NewSubscriber,
 ) -> Result<SubscriberRecord, sqlx::Error> {
@@ -21,7 +21,7 @@ pub async fn insert_subscriber(
     //
     // 邮箱唯一约束是一个【部分】索引：
     //     UNIQUE (email) WHERE status <> 'unsubscribed'
-    // 意思是"同一邮箱最多一行活跃订阅"，退订过的行想留几行都行。
+    // 意思是"同一邮箱最多一行活跃订阅"，退订过的行想留几行都行。 
     //
     // 于是"退订过的人重新订阅"这个场景最自然的写法会坏掉：
     //
