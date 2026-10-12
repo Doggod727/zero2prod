@@ -398,6 +398,37 @@
     },
     "query": "SELECT count(*) AS count FROM subscription_tokens"
   },
+  "68b4be9b6916196bdec0bddbd69751bdba29fc962fefea20edacb61d23db4631": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "status",
+          "ordinal": 1,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text",
+          "Text",
+          "Timestamptz",
+          "Text",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n        INSERT INTO subscriptions (id, email, name, subscribed_at, status)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (email) WHERE status <> 'unsubscribed'\n        DO UPDATE SET name = EXCLUDED.name,\n                      status = EXCLUDED.status\n        WHERE subscriptions.status <> $6\n        RETURNING id, status\n        "
+  },
   "6b533827c0fc9ad600668ed8d89f18d249e7903059c9f90591b991a31b27b990": {
     "describe": {
       "columns": [
@@ -509,34 +540,6 @@
       }
     },
     "query": "SELECT count(*) AS count FROM email_delivery_queue\n         WHERE task_type = 'confirmation' AND recipient = $1"
-  },
-  "7d878c8c49afc3586e945e56d3932eb58062590b92d8be9d88d559af8819496d": {
-    "describe": {
-      "columns": [
-        {
-          "name": "processing!",
-          "ordinal": 0,
-          "type_info": "Bool"
-        },
-        {
-          "name": "still_alive!",
-          "ordinal": 1,
-          "type_info": "Bool"
-        }
-      ],
-      "nullable": [
-        null,
-        null
-      ],
-      "parameters": {
-        "Left": [
-          "Uuid",
-          "Text",
-          "Int4"
-        ]
-      }
-    },
-    "query": "\n        SELECT\n            -- ⚠️ `as \"processing!\"` 这个感叹号是 sqlx 的【显式非空标注】，不是笔误。\n            --    不加它：sqlx 看到可空列上的 IS NULL / 比较表达式，会把结果推断成\n            --    Option<bool>，于是 Rust 侧 `!r.processing` 直接编译不过\n            --    （cannot apply unary operator `!` to type `Option<bool>`）。\n            --    加 COALESCE 也没用 —— 0.6 的推断不看函数语义。\n            --    这类\"数据库说它非空、但类型系统不知道\"的场合，就是 `!` 的用途。\n            response_body IS NULL AS \"processing!\",\n            -- 「还活着吗」这个判断直接交给数据库算，不在 Rust 侧再写一遍。\n            -- 理由：租约时长（$3）是同一个数，如果 Rust 用 chrono 算、SQL 用\n            -- make_interval 算，两处迟早会漂移；而且 now() 必须来自数据库，\n            -- 应用服务器和数据库的时钟不一定一致，拿应用时间比库时间会误判。\n            create_at > now() - make_interval(mins => $3) AS \"still_alive!\"\n        FROM idempotency\n        WHERE user_id = $1 AND idempotency_key = $2\n        "
   },
   "82f0ce5bb3cba4c5a043809304f8c50597ce036f40daf6bfab2aefd03fb4552a": {
     "describe": {
@@ -820,6 +823,34 @@
     },
     "query": "INSERT INTO newsletter_issues (newsletter_issue_id, title, text_content, html_content, published_at)\n         VALUES ($1, 't', 'a', 'b', now())"
   },
+  "a0dc056d3f074cda5b50d8ea2e9d010824c3a5e8fde6ed67a83c2a6b10c858e2": {
+    "describe": {
+      "columns": [
+        {
+          "name": "processing!",
+          "ordinal": 0,
+          "type_info": "Bool"
+        },
+        {
+          "name": "still_alive!",
+          "ordinal": 1,
+          "type_info": "Bool"
+        }
+      ],
+      "nullable": [
+        null,
+        null
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Text",
+          "Int4"
+        ]
+      }
+    },
+    "query": "\n        SELECT\n            -- ⚠️ `!` 是 sqlx 的显式非空标注，不是笔误：不加它，可空列上的\n            --    IS NULL 会被推断成 Option<bool>，Rust 侧 `!r.processing` 编译不过。\n            --    加 COALESCE 也没用（0.6 的推断不看函数语义）。\n            response_body IS NULL AS \"processing!\",\n            -- 「还活着吗」这个判断直接交给数据库算，不在 Rust 侧再写一遍。\n            -- 理由：租约时长（$3）是同一个数，如果 Rust 用 chrono 算、SQL 用\n            -- make_interval 算，两处迟早会漂移；而且 now() 必须来自数据库，\n            -- 应用服务器和数据库的时钟不一定一致，拿应用时间比库时间会误判。\n            create_at > now() - make_interval(mins => $3) AS \"still_alive!\"\n        FROM idempotency\n        WHERE user_id = $1 AND idempotency_key = $2\n        "
+  },
   "a46880e43ece8d01b9cc13f3270b5a9977e4da0e1ab7872623b2d3998c9cc2a7": {
     "describe": {
       "columns": [
@@ -878,61 +909,6 @@
     },
     "query": "\n        SELECT user_id, password_hash\n        FROM users\n        WHERE username = $1\n        "
   },
-  "ae94cc71fa54e3af53860273e16fdd6913cf3efaca543d5878d7906aa3cb01ac": {
-    "describe": {
-      "columns": [
-        {
-          "name": "id",
-          "ordinal": 0,
-          "type_info": "Uuid"
-        },
-        {
-          "name": "status",
-          "ordinal": 1,
-          "type_info": "Text"
-        }
-      ],
-      "nullable": [
-        false,
-        false
-      ],
-      "parameters": {
-        "Left": [
-          "Text"
-        ]
-      }
-    },
-    "query": "\n                SELECT id, status FROM subscriptions\n                WHERE email = $1 AND status <> 'unsubscribed'\n                "
-  },
-  "b32a71301a726217e5f5e3fb47a9ea8b06e5c58aea75f8b0a0acbc3d53178722": {
-    "describe": {
-      "columns": [
-        {
-          "name": "id",
-          "ordinal": 0,
-          "type_info": "Uuid"
-        },
-        {
-          "name": "status",
-          "ordinal": 1,
-          "type_info": "Text"
-        }
-      ],
-      "nullable": [
-        false,
-        false
-      ],
-      "parameters": {
-        "Left": [
-          "Text",
-          "Text",
-          "Text",
-          "Text"
-        ]
-      }
-    },
-    "query": "\n        UPDATE subscriptions\n        SET name = $2,\n            status = $3\n        WHERE email = $1\n          AND status = $4\n        RETURNING id, status\n        "
-  },
   "b59c9862c26bc844adebf94f80830aa054fcb8e35b60ac2d5a42f6cc903b2289": {
     "describe": {
       "columns": [
@@ -972,36 +948,6 @@
       }
     },
     "query": "\n        SELECT id, email, name, subscribed_at\n        FROM subscriptions\n        WHERE status = 'confirmed'\n            AND (subscribed_at, id) < ($1, $2)\n        ORDER BY subscribed_at DESC, id DESC\n        LIMIT $3\n        "
-  },
-  "b7f53358925c4e7c3b1813658dd4a74091aadef706310304162d2c51c6271eb8": {
-    "describe": {
-      "columns": [
-        {
-          "name": "id",
-          "ordinal": 0,
-          "type_info": "Uuid"
-        },
-        {
-          "name": "status",
-          "ordinal": 1,
-          "type_info": "Text"
-        }
-      ],
-      "nullable": [
-        false,
-        false
-      ],
-      "parameters": {
-        "Left": [
-          "Uuid",
-          "Text",
-          "Text",
-          "Timestamptz",
-          "Text"
-        ]
-      }
-    },
-    "query": "\n        INSERT INTO subscriptions (id, email, name, subscribed_at, status)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (email) WHERE status <> 'unsubscribed' DO NOTHING\n        RETURNING id, status\n        "
   },
   "c59efba6ad91ed435a4a1e6a24a91a5c57b3f7a60eb08ee19a51619ec42f0429": {
     "describe": {

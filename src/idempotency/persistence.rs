@@ -8,57 +8,34 @@ use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-// ============================================================
-// 过期策略：三个时间量，各自管不同的事
-// ============================================================
+// 三种行的清扫规则不同，这是本模块的核心：
+//   已完成            → 缓存，超 TTL 删除
+//   处理中且新鲜      → 有请求在跑，谁也不能动
+//   处理中且很旧      → 请求死了，让下一个请求【接管】（租约语义，不是 TTL）
 //
-// 这张表有三个状态，清扫它们的合法性完全不同 —— 这是本模块最核心的一条：
-//
-//   已完成（response_body IS NOT NULL）  →  它就是一份缓存，过期即失去重放能力。
-//                                          这正是 TTL 的语义，超时【删除】。
-//   处理中（response_body IS NULL，新）  →  有请求正在跑。删它会发生两件坏事：
-//                                            ① 原请求回来 save_response 时 UPDATE 0 行，
-//                                               它的成果被静默丢弃；
-//                                            ② 用户重试同一个 key 时会撞上
-//                                               "INSERT 冲突但查不到已存响应" → 500。
-//                                          （两条都实测过，见 README 的决策卡。）
-//   处理中 + 很旧（请求崩了）             →  不能删，要让下一个请求【接管】。
-//                                          这是租约（lease）语义，不是 TTL 语义，
-//                                          对应 Redis 那边的看门狗/续租，
-//                                          而不是 maxmemory 淘汰。
+// ⚠️ 删"处理中"的行会同时造成：原请求 save_response 影响 0 行、成果静默丢失；
+//    用户重试撞上"INSERT 冲突但查不到已存响应" → 500。两条都实测过。
 
 /// 已完成条目保留多久。
 ///
-/// ⚠️ 必须【大于最长处理时间】。设小了会这样：一次慢请求（比如给几千人发信）
-///    还没走到 save_response，键就过期被下一个请求接管 → 同一个 key 有两份在跑
-///    → 重复发信。幂等键的全部价值就在这条线上，所以宁可给足余量。
+/// ⚠️ 必须【大于最长处理时间】：设小了，一次慢请求还没走到 save_response
+///    键就被接管 → 同一个 key 两份在跑 → 重复发信。
 ///
-/// 单位是分钟、类型是整数：SQL 那边用 make_interval(mins => $n)，
-/// 而 make_interval 的 mins/hours 是 **integer** 参数。
-/// 如果这里定义成 f64，sqlx 会按 Rust 值把参数绑成 float8，
-/// Postgres 就会报：
-///     function make_interval(mins => double precision) does not exist
-/// 而且即使写成 $n::int 也没用 —— 参数类型已经在协议层定成 float8 了。
-/// 结论：时间量要么用整数常量，要么用 `$n * interval '1 minute'` 这种乘式，
-/// 不要指望在函数参数位置做类型转换。
+/// ⚠️ 必须是整数：SQL 用 make_interval(mins => $n)，而它的 mins/hours 只收 integer。
+///    定义成 f64 的话 sqlx 会把参数绑成 float8，Postgres 报
+///    "function make_interval(mins => double precision) does not exist"，
+///    写成 $n::int 也救不了（协议层已定成 float8）。
 pub const COMPLETED_TTL_MINUTES: i32 = 24 * 60;
 
 /// 处理中条目超过多久算"请求已经死了"。
 ///
-/// 这个值管的是【崩溃恢复】，不是【缓存过期】：
-/// 客户端提交后断连、worker 被杀、部署中断 —— 那一行 response_body 会永远是 NULL。
-/// 没有这个逃生门的话，这个幂等键就被【永久锁死】：用户重试多少次都是 500。
-///
-/// 取 5 分钟的依据：比"正常处理时间"长一个量级（本项目一次发布是秒级），
-/// 又远比 COMPLETED_TTL_MINUTES 短，所以被误接管的窗口极小；
-/// 而真被误接管也只是多跑一次（幂等键本来就是为这种情况准备的兜底）。
+/// 这管的是崩溃恢复，不是缓存过期：客户端断连 / 进程被杀会留下一行永远是 NULL
+/// 的记录，没有这个逃生门，那个幂等键就被永久锁死（用户重试多少次都是 500）。
+/// 取 5 分钟：比正常处理时间长一个量级，又远短于 COMPLETED_TTL_MINUTES。
 pub const STALE_PROCESSING_TTL_MINUTES: i32 = 5;
 
-/// sweeper 两轮之间的间隔。
-///
-/// 它【不影响正确性】—— 过期是靠 try_processing 里的惰性接管保证的，
-/// sweeper 只负责回收磁盘。所以这个值可以取大：一轮就是一个 DELETE，
-/// 跑得勤没有收益，只是白占连接。
+/// sweeper 间隔。不影响正确性 —— 过期靠 try_processing 的惰性接管保证，
+/// sweeper 只回收磁盘，所以可以取大。
 pub const SWEEP_INTERVAL_SECONDS: u64 = 900;
 
 const STALE_PROCESSING_TTL_MESSAGE: &str =
@@ -130,8 +107,8 @@ pub async fn save_response(
         h
     };
 
-    // query_unchecked! 而不是 query!：header_pair[] 这个复合类型 sqlx 推断不出可空性，
-    // 校验器会拒绝。这里用 unchecked 是既有选择，代价是这 5 个参数的类型不在编译期核对。
+    // query_unchecked!：header_pair[] 这个复合类型 sqlx 推断不出可空性，校验器会拒绝。
+    // 代价是这 5 个参数的类型不在编译期核对。
     let updated = sqlx::query_unchecked!(
         r#"
         UPDATE idempotency
@@ -153,14 +130,9 @@ pub async fn save_response(
     .await?
     .rows_affected();
 
-    // ⚠️ 检查 rows_affected，0 行直接报错。
-    //
-    // 不加这个检查的话，一旦这一行在事务期间消失（被运维手工删、或将来加了
-    // 归档任务），UPDATE 会静默影响 0 行、【然后照常 commit】——
-    // 表现是"发布成功了，但幂等键里没存响应"：用户重试同一个 key 时会被
-    // 当成全新请求，于是发出【第二期】newsletter。
-    // 这是幂等机制最严重的一种失效，而且完全没有报错。
-    // 宁可让它在这里炸成 500，也不要静默地失去幂等性。
+    // ⚠️ 0 行就报错。不查的话，这一行若消失，UPDATE 静默影响 0 行然后照常 commit ——
+    //    表现是"发布成功但幂等键里没存响应"，用户重试会被当成全新请求，
+    //    于是发出第二期 newsletter。宁可炸成 500，也不要静默失去幂等性。
     if updated == 0 {
         anyhow::bail!(
             "The idempotency record for key {} disappeared before its response could be saved",
@@ -174,15 +146,9 @@ pub async fn save_response(
     Ok(http_response)
 }
 
-// Clippy 会问：为什么一个 enum 的两个 variant 差了 8 倍？
-// 实测数据：NextAction = 928B，StartProcessing = 928B，ReturnSavedResponse = 104B。
-// 大的那个是 sqlx 的 Transaction 本身（928B），不是我们塞进去的东西 ——
-// 它是「一个已开始的、握着一个池连接的事务」，体积由 sqlx 决定。
-//
-// 为什么不 Box 掉它：省下的是每个请求的 824 字节栈空间，
-// 而这个 enum 每个请求只构造一次、立刻就被 match 消费掉，
-// 代价是每次幂等请求多一次堆分配、代码里多一层解引用。
-// 收益为零、成本非零，所以这里明确接受。
+// 实测 NextAction = 928B，其中 StartProcessing 928B、ReturnSavedResponse 104B ——
+// 大的是 sqlx 的 Transaction 本身。Box 掉只省每请求 824 字节栈空间，
+// 而它每请求只构造一次就立刻被 match 消费，代价是多一次堆分配。接受。
 #[allow(clippy::large_enum_variant)]
 pub enum NextAction {
     StartProcessing(Transaction<'static, Postgres>),
@@ -212,18 +178,14 @@ pub async fn try_processing(
         return Ok(NextAction::StartProcessing(transaction));
     }
 
-    // 冲突了 → 这一行已经存在。它可能是三种东西之一，靠两个字段判断：
-    //   response_body 是否为 NULL   →  是"已完成"还是"处理中"
-    //   create_at 是否够旧          →  处理中那个请求还活着吗
+    // 冲突 → 行已存在。靠两个字段区分三种情况：
+    //   response_body 为 NULL  → 处理中；create_at 够旧 → 那个请求已经死了
     let row = sqlx::query!(
         r#"
         SELECT
-            -- ⚠️ `as "processing!"` 这个感叹号是 sqlx 的【显式非空标注】，不是笔误。
-            --    不加它：sqlx 看到可空列上的 IS NULL / 比较表达式，会把结果推断成
-            --    Option<bool>，于是 Rust 侧 `!r.processing` 直接编译不过
-            --    （cannot apply unary operator `!` to type `Option<bool>`）。
-            --    加 COALESCE 也没用 —— 0.6 的推断不看函数语义。
-            --    这类"数据库说它非空、但类型系统不知道"的场合，就是 `!` 的用途。
+            -- ⚠️ `!` 是 sqlx 的显式非空标注，不是笔误：不加它，可空列上的
+            --    IS NULL 会被推断成 Option<bool>，Rust 侧 `!r.processing` 编译不过。
+            --    加 COALESCE 也没用（0.6 的推断不看函数语义）。
             response_body IS NULL AS "processing!",
             -- 「还活着吗」这个判断直接交给数据库算，不在 Rust 侧再写一遍。
             -- 理由：租约时长（$3）是同一个数，如果 Rust 用 chrono 算、SQL 用

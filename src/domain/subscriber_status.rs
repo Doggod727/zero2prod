@@ -2,12 +2,7 @@
 
 /// 订阅者在生命周期中的状态。
 ///
-/// 用强类型而不是 `String` 的原因：
-/// 之前是 `match record.status.as_str() { "pending_confirmation" => ..., "confirmed" => ... }`，
-/// 一旦字符串拼错（例如写成 "pending_confirmed"）编译器完全帮不上忙，
-/// 而且会静默落进 unknown 分支。改成枚举后：
-///   - 拼错编译不过；
-///   - 以后新增 Unsubscribed / Bounced 时，所有 match 会被编译器强制补全。
+/// 用枚举而不是 String：拼错编译不过；新增状态时所有 match 会被编译器强制补全。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriberStatus {
     PendingConfirmation,
@@ -16,7 +11,7 @@ pub enum SubscriberStatus {
 }
 
 impl SubscriberStatus {
-    /// 数据库里用的字面量，集中在这里，避免散落在 SQL 与 match 之间。
+    /// 数据库里用的字面量，集中在此，避免散落在 SQL 与 match 之间。
     pub fn as_str(&self) -> &'static str {
         match self {
             SubscriberStatus::PendingConfirmation => "pending_confirmation",
@@ -30,15 +25,8 @@ impl SubscriberStatus {
         matches!(self, SubscriberStatus::PendingConfirmation)
     }
 
-    /// 还在收信的人。
-    ///
-    /// 为什么要有这个方法，而不是在各处写 `status == "confirmed"`：
-    ///   "还在收信" 是一个【领域概念】，不是字符串比较。
-    ///   以后加 Bounced（硬退信）时，"活跃"的定义会变，而变化的点只有这一处；
-    ///   散落成字符串比较的话，每加一个状态都要全项目 grep `= 'confirmed'`。
-    ///
-    /// 注意：SQL 里仍然写 `status = 'confirmed'`（数据库不认 Rust 枚举），
-    /// 这个方法管的是 Rust 侧的判断，两者靠 as_str() 保持同一个字面量。
+    /// 还在收信的人。"活跃"是一个领域概念，定义只此一处
+    /// （SQL 里仍然写 status = 'confirmed'，靠 as_str() 保持同一个字面量）。
     pub fn is_active(&self) -> bool {
         matches!(self, SubscriberStatus::Confirmed)
     }
